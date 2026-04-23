@@ -95,6 +95,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Ensure required directories exist before mounting static files
+Path("media").mkdir(exist_ok=True)
+
 # Mount media directory for static file serving
 app.mount("/media", StaticFiles(directory="media"), name="media")
 
