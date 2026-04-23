@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+
+# Local Environment
+.env
+.env.local
+
+# MLflow
+mlruns/
+mlflow.db
+
+# Database
+thyrax.db
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
