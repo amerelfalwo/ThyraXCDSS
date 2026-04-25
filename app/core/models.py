@@ -30,14 +30,16 @@ def load_segmentation_model():
 
 @functools.lru_cache(maxsize=None)
 def load_classification_model():
-    """Load and return the cached 'classification_b4.onnx' model session.
+    """Load and return the cached 'efficientnet_b4_medical_final.onnx' model session.
     
-    This is the 'old' reliable model requested by the user, replacing 
-    the experimental medical_final variant.
+    This is the high-accuracy model requested by the user.
     """
     import onnxruntime as ort
 
     model_path = BASE_DIR / "models" / "compressed" / "efficientnet_b4_medical_final.onnx"
+    if not model_path.exists():
+        raise FileNotFoundError(f"Classification model not found at {model_path}")
+        
     logger.info(f"Loading classification ONNX model from {model_path} into memory cache")
     return ort.InferenceSession(
         str(model_path),

@@ -140,7 +140,16 @@ def _run_fnac_classification(image_bytes: bytes) -> dict:
 
     # Preprocess for medical_final (380x380, NCHW)
     tensor = _preprocess_fnac_image(image_bytes)
-    output = session.run(None, {input_name: tensor})[0][0]
+    
+    # Run inference
+    raw_outputs = session.run(None, {input_name: tensor})
+    if not raw_outputs:
+        raise ValueError("Model returned no outputs.")
+        
+    output = raw_outputs[0]
+    # Check shape: expect (1, 1) or (1,)
+    if output.ndim == 2:
+        output = output[0] # (1, 1) -> (1,)
     
     print(f"DEBUG: Raw FNAC output for {img_hash}: {output}", flush=True)
 
@@ -199,11 +208,13 @@ async def predict_fnac(
         # ── 1. Classification ──
         try:
             result = await run_in_threadpool(_run_fnac_classification, image_bytes)
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"FNAC classification model error (dummy file?): {e}")
+            logger.error(f"FNAC classification model error: {e}", exc_info=True)
             raise HTTPException(
                 status_code=503,
-                detail="The FNAC classification model is not yet deployed or is invalid. Please try again later."
+                detail=f"The FNAC classification model failed to run: {str(e)}. Please check if model file is valid."
             )
 
         # ── Push to Patient State ──
@@ -232,15 +243,16 @@ async def predict_fnac(
             session_id=session_id,
         )
 
-    except FileNotFoundError:
+    except HTTPException:
+        raise
+    except FileNotFoundError as e:
         raise HTTPException(
             status_code=503,
             detail=(
-                "FNAC ONNX model not found. The model file "
-                "'models/compressed/fnac_bethesda.onnx' has not been deployed yet. "
-                "Please train and export the FNAC classifier first."
+                f"FNAC ONNX model not found: {e}. "
+                "The model file 'models/compressed/efficientnet_b4_medical_final.onnx' might be missing."
             ),
         )
     except Exception as e:
         logger.error(f"FNAC processing error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"FNAC classification error: {e}")
+        raise HTTPException(status_code=500, detail=f"FNAC classification error: {str(e)}")
