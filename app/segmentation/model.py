@@ -182,7 +182,11 @@ def process_full_pipeline(
     # ── Lazy import: ONNX model loaders ──
     from app.core.models import load_segmentation_model, load_classification_model
 
+    import hashlib
     nparr = np.frombuffer(image_bytes, np.uint8)
+    img_hash = hashlib.sha256(image_bytes).hexdigest()
+    print(f"DEBUG: Processing image with SHA256: {img_hash}", flush=True)
+
     img_color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     orig_rgb = cv2.cvtColor(img_color, cv2.COLOR_BGR2RGB)
     img_gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
@@ -234,18 +238,39 @@ def process_full_pipeline(
     # ────────────────────────────────────────────────────────────
     # Phase 3: Classification
     # ────────────────────────────────────────────────────────────
-    roi_cls_in = cv2.resize(roi, (224, 224)).astype(np.float32) / 255.0
+    # medical_final model expects (380, 380) in NCHW format.
+    roi_cls_in = cv2.resize(roi, (380, 380)).astype(np.float32) / 255.0
+    
+    # ImageNet Mean/Std normalization
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    roi_cls_in = (roi_cls_in - mean) / std
+    
+    # Transpose to (Batch, Channel, Height, Width) - NCHW format
+    roi_cls_in = np.transpose(roi_cls_in, (2, 0, 1))
     roi_cls_in = np.expand_dims(roi_cls_in, axis=0)
 
     cls_session = load_classification_model()
     cls_input_name = cls_session.get_inputs()[0].name
     cls_pred = cls_session.run(None, {cls_input_name: roi_cls_in})[0][0]
+    
+    print(f"DEBUG: Raw classification output for {img_hash}: {cls_pred}", flush=True)
 
     logger.debug("Classification model kept in memory cache")
 
-    prob = float(cls_pred[0])
-    class_idx = 1 if prob > 0.5 else 0
-    confidence = prob if class_idx == 1 else 1 - prob
+    # Robust output handling: works with 1-output (logits) or 2-output (softmax)
+    if len(cls_pred) > 1:
+        # Multi-class or 2-class Softmax
+        exp_vals = np.exp(cls_pred - np.max(cls_pred))
+        probs = exp_vals / exp_vals.sum()
+        class_idx = int(np.argmax(probs))
+        confidence = float(probs[class_idx])
+    else:
+        # Single output Logit -> Apply Sigmoid
+        logit = float(cls_pred[0])
+        prob = 1.0 / (1.0 + np.exp(-logit))
+        class_idx = 1 if prob > 0.5 else 0
+        confidence = prob if class_idx == 1 else 1.0 - prob
 
     unique_id = str(uuid.uuid4())
 
@@ -267,10 +292,12 @@ def process_full_pipeline(
     return {
         "status": "success",
         "bbox": bbox,
+        "input_md5": img_hash,
         "classification": {
             "prediction": class_idx,
             "label": "suspicious" if class_idx == 1 else "benign",
             "confidence_pct": round(confidence * 100, 2),
+            "raw_logit": round(float(cls_pred[0]), 4) if len(cls_pred) == 1 else None,
             "risk_level": risk["risk_level"],
             "acr_tirads_level": risk["acr_tirads_level"],
             "clinical_recommendation": risk["clinical_recommendation"],

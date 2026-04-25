@@ -28,7 +28,10 @@ class Settings(BaseSettings):
     # ── Embeddings ──
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = {
+        "env_file": str(Path(__file__).resolve().parent.parent.parent / ".env"),
+        "extra": "ignore"
+    }
 
 
 settings = Settings()

@@ -111,7 +111,7 @@ def _preprocess_fnac_image(image_bytes: bytes) -> np.ndarray:
 
     with Image.open(io.BytesIO(image_bytes)) as img:
         img = img.convert("RGB")
-        img = img.resize((384, 384), Image.Resampling.BILINEAR)
+        img = img.resize((380, 380), Image.Resampling.BILINEAR)
         
     arr = np.array(img, dtype=np.float32) / 255.0
     
@@ -125,22 +125,31 @@ def _preprocess_fnac_image(image_bytes: bytes) -> np.ndarray:
 
 def _run_fnac_classification(image_bytes: bytes) -> dict:
     """
-    Run the FNAC ONNX classifier (binary Benign/Malignant) on cytopathology image bytes.
-    Maps the binary prediction to Bethesda System categories.
+    Run the high-accuracy medical_final model on cytopathology image bytes.
+    Maps the binary prediction to Bethesda System categories (II vs VI).
     """
     import numpy as np
-    from app.core.models import load_fnac_gatekeeper_model
-    from app.services.image_service import _softmax
+    from app.core.models import load_classification_model
 
-    session = load_fnac_gatekeeper_model()
+    session = load_classification_model()
     input_name = session.get_inputs()[0].name
 
+    import hashlib
+    img_hash = hashlib.sha256(image_bytes).hexdigest()
+    print(f"DEBUG: Processing FNAC image with SHA256: {img_hash}", flush=True)
+
+    # Preprocess for medical_final (380x380, NCHW)
     tensor = _preprocess_fnac_image(image_bytes)
     output = session.run(None, {input_name: tensor})[0][0]
+    
+    print(f"DEBUG: Raw FNAC output for {img_hash}: {output}", flush=True)
 
-    probs = _softmax(output)
-    raw_class_idx = int(np.argmax(probs))
-    confidence = float(probs[raw_class_idx])
+    # Single output Logit -> Apply Sigmoid
+    logit = float(output[0])
+    prob = 1.0 / (1.0 + np.exp(-logit))
+    
+    raw_class_idx = 1 if prob > 0.5 else 0
+    confidence = prob if raw_class_idx == 1 else 1.0 - prob
 
     # Model Classes: 0 = "Benign", 1 = "Malignant (Papillary)"
     # Map to BETHESDA_MAP indices: 1 = Bethesda II (Benign), 5 = Bethesda VI (Malignant)
@@ -150,10 +159,12 @@ def _run_fnac_classification(image_bytes: bytes) -> dict:
     needs_review = confidence < 0.65
 
     return {
+        "input_md5": img_hash,
         "prediction": bethesda_idx,
         "bethesda_category": bethesda["category"],
         "bethesda_label": bethesda["label"],
         "confidence_pct": round(confidence * 100, 2),
+        "raw_logit": round(float(output[0]), 4) if len(output) == 1 else None,
         "malignancy_risk": bethesda["malignancy_risk"],
         "recommendation": bethesda["recommendation"],
         "needs_manual_review": needs_review,
