@@ -21,12 +21,15 @@ Features:
 import re
 import json
 import logging
+import base64
+from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.core.security import verify_internal_api_key
-from app.schemas.chat import ChatRequest, ChatResponse
+from app.schemas.chat import ChatResponse
+from app.agent.agent import run_agent
 
 logger = logging.getLogger(__name__)
 
@@ -100,25 +103,36 @@ _MEDICAL_KEYWORDS = [
     "nausea", "vomit", "diarrhea", "constipat",
 ]
 
-_REJECTION_RESPONSE = (
-    "I appreciate your question, but I'm ThyraX — a medical AI assistant "
-    "designed to help with clinical and healthcare questions.\n\n"
-    "I can assist with:\n"
-    "• Medical guidelines and clinical protocols\n"
-    "• Lab result interpretation\n"
-    "• Symptom analysis and differential diagnoses\n"
-    "• Drug information and pharmacology\n"
-    "• Imaging interpretation guidance\n\n"
-    "Please rephrase your question in a medical or healthcare context."
-)
+def _get_rejection_message(query: str) -> str:
+    """Returns the rejection message in the language of the query."""
+    if query and any("\u0600" <= char <= "\u06FF" for char in query):
+        return (
+            "أنا أقدر سؤالك، لكني ThyraX — مساعد ذكاء اصطناعي طبي "
+            "مصمم للمساعدة في الأسئلة السريرية والرعاية الصحية.\n\n"
+            "يمكنني المساعدة في:\n"
+            "• المبادئ التوجيهية الطبية والبروتوكولات السريرية\n"
+            "• تفسير نتائج المختبر\n"
+            "• تحليل الأعراض والتشخيص التفريقي\n"
+            "• معلومات الأدوية وعلم الصيدلة\n"
+            "• إرشادات تفسير الصور الطبية\n\n"
+            "يرجى إعادة صياغة سؤالك في سياق طبي أو صحي."
+        )
+    return (
+        "I appreciate your question, but I'm ThyraX — a medical AI assistant "
+        "designed to help with clinical and healthcare questions.\n\n"
+        "I can assist with:\n"
+        "• Medical guidelines and clinical protocols\n"
+        "• Lab result interpretation\n"
+        "• Symptom analysis and differential diagnoses\n"
+        "• Drug information and pharmacology\n"
+        "• Imaging interpretation guidance\n\n"
+        "Please rephrase your question in a medical or healthcare context."
+    )
 
 
 def _is_medical_query(query: str) -> bool:
     """
     Check whether a query is medical/clinical in nature.
-
-    Returns True if the query appears medical, False if it's clearly
-    non-medical (coding, recipes, sports, etc.).
     """
     query_lower = query.lower()
 
@@ -133,39 +147,39 @@ def _is_medical_query(query: str) -> bool:
             return False
 
     # Default: allow ambiguous queries through to the LLM
-    # (the agent's system prompt has its own guardrails)
     return True
 
 
-def _get_effective_query(req: ChatRequest) -> str:
+def _get_effective_query(query: str | None, has_image: bool) -> str:
     """
     Derive the effective text query for guardrails and logging.
-
-    - Text mode:  returns query directly
-    - Image mode: returns a default medical analysis prompt
-    - Both mode:  returns query directly
     """
-    if req.query:
-        return req.query
-    return "Analyze the attached medical image"
+    if query:
+        return query
+    if has_image:
+        return "Analyze the attached medical image"
+    return "No query provided"
 
 
 # ═══════════════════════════════════════════════════════════════
 # Streaming Generator
 # ═══════════════════════════════════════════════════════════════
 
-async def _stream_agent_response(req: ChatRequest):
+async def _stream_agent_response(
+    query: Optional[str],
+    chat_history: List[dict],
+    image_base64: Optional[str],
+    image_content_type: Optional[str],
+    session_id: Optional[str]
+):
     """
-    Generator that runs the agent and yields the full response
-    as a single SSE-style data chunk. For true token-level streaming,
-    the LangChain agent would need a streaming callback; this approach
-    provides immediate "processing" feedback + final result.
+    Generator that runs the agent and yields the response as SSE.
     """
     from app.core.circuit_breaker import is_circuit_open, record_success, record_failure
     from app.core.audit import log_audit_event
     import asyncio
 
-    effective_query = _get_effective_query(req)
+    effective_query = _get_effective_query(query, bool(image_base64))
 
     # ── Circuit breaker check ──
     if is_circuit_open("agent_chat"):
@@ -189,19 +203,12 @@ async def _stream_agent_response(req: ChatRequest):
 
     for attempt in range(MAX_RETRIES):
         try:
-            from app.agent.agent import run_agent
-
-            history_dicts = [
-                {"role": msg.role, "content": msg.content}
-                for msg in (req.chat_history or [])
-            ]
-
             result = await run_agent(
-                query=req.query,
-                chat_history=history_dicts,
-                image_base64=req.image_base64,
-                image_content_type=req.image_content_type,
-                session_id=req.session_id,
+                query=query,
+                chat_history=chat_history,
+                image_base64=image_base64,
+                image_content_type=image_content_type,
+                session_id=session_id,
             )
 
             output_text = result["output"]
@@ -224,17 +231,17 @@ async def _stream_agent_response(req: ChatRequest):
                 metadata={
                     "query": effective_query[:200],
                     "tools_used": result["tools_used"],
-                    "has_image": bool(req.image_base64),
-                    "session_id": req.session_id,
-                    "mode": "image_only" if not req.query else (
-                        "multimodal" if req.image_base64 else "text_only"
+                    "has_image": bool(image_base64),
+                    "session_id": session_id,
+                    "mode": "image_only" if not query else (
+                        "multimodal" if image_base64 else "text_only"
                     ),
                 },
             )
 
             payload = json.dumps({
                 "status": "success",
-                "query": req.query,
+                "query": query,
                 "response": output_text,
                 "tools_used": result["tools_used"],
             })
@@ -282,62 +289,83 @@ async def _stream_agent_response(req: ChatRequest):
 # ═══════════════════════════════════════════════════════════════
 
 @router.post("/chat/stream")
-async def agent_chat_stream(req: ChatRequest):
+async def agent_chat_stream(
+    query: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None),
+    chat_history: str = Form("[]"),
+    image: Optional[UploadFile] = File(None),
+):
     """
     Chat with ThyraX via Server-Sent Events (streaming).
-
-    Supports three input modes:
-      - Text only:   `{"query": "What is TSH?"}`
-      - Image only:  `{"image_base64": "...", "image_content_type": "image/png"}`
-      - Multimodal:  `{"query": "Interpret this", "image_base64": "..."}`
-
-    Returns a StreamingResponse with SSE events:
-      - `{"status": "thinking"}` — query received, processing
-      - `{"status": "retrying", "attempt": N}` — transient error, retrying
-      - `{"status": "success", "response": "...", "tools_used": [...]}` — final result
-      - `{"status": "error", "response": "..."}` — all retries exhausted
+    Now supports multipart/form-data for direct file uploads.
     """
-    # Only run guardrail on text queries; image-only requests are always medical
-    if req.query and not _is_medical_query(req.query):
-        logger.info(f"Non-medical query rejected: {req.query[:80]}...")
+    # Parse chat_history
+    try:
+        history_list = json.loads(chat_history)
+    except Exception:
+        history_list = []
+
+    # Process image
+    image_base64 = None
+    image_content_type = None
+    if image:
+        image_bytes = await image.read()
+        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+        image_content_type = image.content_type
+
+    # Only run guardrail on text queries
+    if query and not _is_medical_query(query):
+        logger.info(f"Non-medical query rejected: {query[:80]}...")
         async def _reject():
             payload = json.dumps({
                 "status": "rejected",
-                "query": req.query,
-                "response": _REJECTION_RESPONSE,
+                "query": query,
+                "response": _get_rejection_message(query),
                 "tools_used": [],
             })
             yield f"data: {payload}\n\n"
         return StreamingResponse(_reject(), media_type="text/event-stream")
 
     return StreamingResponse(
-        _stream_agent_response(req),
+        _stream_agent_response(query, history_list, image_base64, image_content_type, session_id),
         media_type="text/event-stream",
     )
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def agent_chat(req: ChatRequest):
+async def agent_chat(
+    query: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None),
+    chat_history: str = Form("[]"),
+    image: Optional[UploadFile] = File(None),
+):
     """
     Chat with the ThyraX AI medical assistant (Node 5).
-
-    Supports three input modes:
-      - Text only:   `{"query": "What is TSH?"}`
-      - Image only:  `{"image_base64": "...", "image_content_type": "image/png"}`
-      - Multimodal:  `{"query": "Interpret this", "image_base64": "..."}`
-
-    Standard JSON response (non-streaming). For real-time UX,
-    use POST /agent/chat/stream instead.
+    Now supports multipart/form-data for direct file uploads.
     """
-    effective_query = _get_effective_query(req)
+    # Parse chat_history
+    try:
+        history_list = json.loads(chat_history)
+    except Exception:
+        history_list = []
 
-    # ── Medical Guardrail Pre-filter (only for text queries) ──
-    if req.query and not _is_medical_query(req.query):
-        logger.info(f"Non-medical query rejected: {req.query[:80]}...")
+    # Process image
+    image_base64 = None
+    image_content_type = None
+    if image:
+        image_bytes = await image.read()
+        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+        image_content_type = image.content_type
+
+    effective_query = _get_effective_query(query, bool(image_base64))
+
+    # ── Medical Guardrail Pre-filter ──
+    if query and not _is_medical_query(query):
+        logger.info(f"Non-medical query rejected: {query[:80]}...")
         return ChatResponse(
             status="rejected",
-            query=req.query,
-            response=_REJECTION_RESPONSE,
+            query=query,
+            response=_get_rejection_message(query),
             tools_used=[],
         )
 
@@ -357,19 +385,12 @@ async def agent_chat(req: ChatRequest):
 
     for attempt in range(MAX_RETRIES):
         try:
-            from app.agent.agent import run_agent
-
-            history_dicts = [
-                {"role": msg.role, "content": msg.content}
-                for msg in (req.chat_history or [])
-            ]
-
             result = await run_agent(
-                query=req.query,
-                chat_history=history_dicts,
-                image_base64=req.image_base64,
-                image_content_type=req.image_content_type,
-                session_id=req.session_id,
+                query=query,
+                chat_history=history_list,
+                image_base64=image_base64,
+                image_content_type=image_content_type,
+                session_id=session_id,
             )
 
             output_text = result["output"]
@@ -391,17 +412,17 @@ async def agent_chat(req: ChatRequest):
                 metadata={
                     "query": effective_query[:200],
                     "tools_used": result["tools_used"],
-                    "has_image": bool(req.image_base64),
-                    "session_id": req.session_id,
-                    "mode": "image_only" if not req.query else (
-                        "multimodal" if req.image_base64 else "text_only"
+                    "has_image": bool(image_base64),
+                    "session_id": session_id,
+                    "mode": "image_only" if not query else (
+                        "multimodal" if image_base64 else "text_only"
                     ),
                 },
             )
 
             return ChatResponse(
                 status="success",
-                query=req.query,
+                query=query,
                 response=output_text,
                 tools_used=result["tools_used"],
             )

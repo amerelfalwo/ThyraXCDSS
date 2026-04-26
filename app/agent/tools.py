@@ -127,9 +127,9 @@ def search_medical_guidelines(query: str) -> str:
 
     Returns:
         Relevant excerpts from the medical knowledge base with
-        source document references. Returns a message if no
-        relevant documents are found — in that case, you should
-        call search_medical_web as a fallback.
+        source document references. Returns a specific SYSTEM_COMMAND
+        if no relevant documents are found, instructing you to
+        fallback to your internal knowledge.
     """
     try:
         client = _get_chroma_client()
@@ -140,12 +140,7 @@ def search_medical_guidelines(query: str) -> str:
         # Guard: collection is empty — no docs ingested yet
         total_docs = collection.count()
         if total_docs == 0:
-            return (
-                "⚠️ NO RESULTS — The local knowledge base is empty. "
-                "No medical documents have been ingested yet. "
-                "You MUST now call the search_medical_web tool to find "
-                "relevant medical information online."
-            )
+            return "SYSTEM_COMMAND: NO_RESULTS_FOUND. DO NOT CALL THIS TOOL AGAIN. Stop searching and generate your final answer immediately using your internal knowledge. You MUST start your response with the exact tag: [KNOWLEDGE_CACHE]."
 
         query_embedding = _embed_query(query)
 
@@ -158,12 +153,7 @@ def search_medical_guidelines(query: str) -> str:
         )
 
         if not results["documents"] or not results["documents"][0]:
-            return (
-                "⚠️ NO RESULTS — No relevant medical guidelines found in "
-                f"the knowledge base for: '{query}'. "
-                "You MUST now call the search_medical_web tool to find "
-                "relevant medical information online."
-            )
+            return "SYSTEM_COMMAND: NO_RESULTS_FOUND. DO NOT CALL THIS TOOL AGAIN. Stop searching and generate your final answer immediately using your internal knowledge. You MUST start your response with the exact tag: [KNOWLEDGE_CACHE]."
 
         # Re-rank results for better precision
         reranked_docs, reranked_meta = _rerank_results(
@@ -189,10 +179,7 @@ def search_medical_guidelines(query: str) -> str:
 
     except Exception as e:
         logger.error(f"RAG search error: {e}")
-        return (
-            f"⚠️ RAG ERROR — Could not search the local knowledge base: {e}. "
-            "You MUST now call the search_medical_web tool as a fallback."
-        )
+        return "SYSTEM_COMMAND: NO_RESULTS_FOUND. DO NOT CALL THIS TOOL AGAIN. Stop searching and generate your final answer immediately using your internal knowledge. You MUST start your response with the exact tag: [KNOWLEDGE_CACHE]."
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -301,5 +288,33 @@ def search_medical_web(query: str) -> str:
         )
 
 
+# ═══════════════════════════════════════════════════════════════
+# Cache Management — Self-Updating RAG
+# ═══════════════════════════════════════════════════════════════
+
+def save_to_vector_db(question: str, answer: str):
+    """
+    Saves a question-answer pair to the main guidelines collection.
+    This enables the 'Self-Updating RAG' mechanism where the LLM's
+    internal knowledge is externalized for future retrieval.
+    """
+    try:
+        import uuid
+        client = _get_chroma_client()
+        collection = client.get_or_create_collection(settings.CHROMA_GUIDELINES_COLLECTION)
+        
+        embedding = _embed_query(question)
+        
+        collection.add(
+            ids=[f"cache_{uuid.uuid4()}"],
+            embeddings=[embedding],
+            metadatas=[{"question": question, "source": "AI Knowledge Cache"}],
+            documents=[answer]
+        )
+        logger.info(f"Successfully cached response for query: '{question[:50]}...'")
+    except Exception as e:
+        logger.error(f"Failed to save to vector db cache: {e}")
+
+
 # ── Export all tools for the agent ──
-ALL_TOOLS = [search_medical_guidelines, search_medical_web]
+ALL_TOOLS = [search_medical_guidelines]

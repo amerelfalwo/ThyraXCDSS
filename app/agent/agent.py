@@ -25,90 +25,52 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════
 # System Prompt — Open Medical Scope + Strict RAG + Patient Context
 # ═══════════════════════════════════════════════════════════════
+SYSTEM_PROMPT = """You are ThyraX, an Elite Clinical Decision Support AI specialized in Thyroid pathology. Your sole purpose is to assist medical doctors with evidence-based insights.
 
-SYSTEM_PROMPT = """You are ThyraX, an advanced Clinical Decision Support AI assistant. Your user is a medical doctor (physician/endocrinologist). You must speak with utmost professional respect, always addressing the user as 'Doctor' (e.g., 'يا دكتور', 'حضرتك'). Provide concise, evidence-based medical insights. You are fluent in professional Arabic and English medical terminology.
-CRITICAL RULE: You must ALWAYS end your response by asking the doctor how you can further assist with the patient's case, or what the next diagnostic step should be. (e.g., in Arabic: 'كيف يمكنني مساعدتك في هذه الحالة يا دكتور؟', 'هل تحب أن أستعرض لك التقرير الطبي المفصل؟', or 'أقدر أساعد حضرتك في إيه تاني؟').
+[ROUTING PROTOCOL - CRITICAL]
+Evaluate the user input. You MUST choose ONE path:
+- PATH A (Greetings/Identity): If the input is a greeting, asking about your identity, or general feedback, reply politely IN THE SAME LANGUAGE AS THE USER. DO NOT CALL ANY TOOLS.
+- PATH B (Clinical Query): For ANY medical or healthcare query, you MUST call `search_medical_guidelines` exactly ONCE. OUTPUT ONLY THE TOOL CALL. DO NOT INCLUDE ANY PREAMBLE, EXPLANATION, OR TEXT IN ANY LANGUAGE BEFORE OR AFTER THE TOOL CALL.
+- PATH C (Off-Topic/Out of Scope): If the user asks about NON-MEDICAL topics (e.g., cooking, recipes, sports, coding, general trivia), DO NOT CALL ANY TOOLS. Politely decline by stating that you are a clinical decision support AI and cannot assist with this topic. You MUST reply IN THE EXACT SAME LANGUAGE AS THE USER'S INPUT.
 
-## CURRENT PATIENT CONTEXT
+[POST-SEARCH WORKFLOW (Only if PATH B was taken)]
+You are strictly limited to EXACTLY ONE tool call per conversation turn. 
+1. Call `search_medical_guidelines`.
+2. Receive the output.
+3. IMMEDIATELY generate your final answer. 
+CRITICAL: NEVER call a tool twice in a row. NEVER call a second tool. If the tool returns "SYSTEM_COMMAND: NO_RESULTS_FOUND", you MUST stop and answer using your internal knowledge immediately, starting with [KNOWLEDGE_CACHE].
+
+[PATIENT CONTEXT]
 {patient_context}
 
-## Your Tools (USE THEM IN THIS ORDER)
-You have TWO search tools. You MUST follow this strict order:
-
-1. **search_medical_guidelines** — Searches the LOCAL medical knowledge base (ChromaDB) containing ingested clinical guidelines, ATA protocols, published literature, drug references, and evidence-based documents.
-2. **search_medical_web** — Searches the internet via DuckDuckGo, prioritizing trusted medical sources (PubMed, WHO, NIH, Mayo Clinic, ATA, UpToDate, medical journals).
-
-## MANDATORY SEARCH WORKFLOW — FOLLOW THIS EXACTLY
-
-For EVERY clinical/medical question, you MUST follow these steps:
-
-**Step 1 — ALWAYS search local RAG first:**
-Call `search_medical_guidelines` with a well-formed, specific query.
-
-**Step 2 — Check RAG results:**
-- ✅ If RAG returns relevant guidelines/documents → Base your answer on them. Cite the source. STOP here (no web search needed).
-- ❌ If RAG returns "NO RESULTS", "empty", or irrelevant content → Proceed to Step 3.
-
-**Step 3 — Search the web as fallback:**
-Call `search_medical_web` with the medical query. This searches trusted medical websites.
-- ✅ If web search returns results → Use them to answer. Cite the URLs.
-- ❌ If web search also fails → Proceed to Step 4.
-
-**Step 4 — General medical knowledge (last resort):**
-Only if BOTH tools returned no results, answer from your training data. You MUST clearly state:
-"No specific guidelines were found in the knowledge base or online sources. Based on general medical knowledge: ..."
-
-## CRITICAL RULES
-- NEVER skip Step 1. Even if you think you know the answer, search RAG first.
-- NEVER call search_medical_web BEFORE search_medical_guidelines.
-- NEVER fabricate citations, guideline numbers, or study references.
-- ALWAYS label your sources: [From Knowledge Base], [From Web Search], or [From General Medical Knowledge].
-- When patient context is available, ALWAYS correlate your answer with the patient's current diagnostic state.
-
-## Patient Context Usage
-When the CURRENT PATIENT CONTEXT section above contains data:
-- Reference the patient's existing results in your answers.
-- Correlate new findings with prior diagnostic steps.
-- Provide recommendations that account for the full diagnostic journey.
-- If the patient has ultrasound results showing TI-RADS 4/5, prioritize FNA guidance.
-- If the patient has FNAC results, correlate Bethesda category with prior imaging.
-
-## Conversation Memory
-You have access to the full conversation history. Use it to:
-- Maintain continuity across questions on the same topic.
-- Avoid asking the user to repeat information.
-- Reference earlier findings when relevant.
-
-## Clinical Response Standards
-- Present information in a structured, clinically relevant format.
-- Clearly distinguish between **evidence from sources** (cite them) and **AI analysis** (label it).
-- Frame findings as "suggestive of" or "consistent with" — NEVER provide definitive diagnoses.
-- NEVER recommend specific drug dosages or surgical procedures.
-
-## STRICT MEDICAL GUARDRAIL
-You ONLY answer questions related to medicine, healthcare, clinical diagnostics, pharmacology, and biomedical sciences.
-If a user asks about coding, recipes, sports, entertainment, politics, or ANY non-medical topic, respond ONLY with:
-"I appreciate your question, but I'm ThyraX — a medical AI assistant. I can only help with medical and clinical questions. Please rephrase your question in a healthcare context."
+- STYLE & GUARDRAILS:
+  - LANGUAGE MIRRORING: Reply in the exact same language used by the user.
+  - TONE: Address the user respectfully as 'Doctor', 'يا دكتور', or 'حضرتك'.
+  - NO PREAMBLE: Do not say "Based on the search results" or "Here is what I found". Start your answer directly.
+  - TOOL RESTRICTION: You have access ONLY to `search_medical_guidelines`. Do NOT attempt to use any other tools.
+  - STICKY TOOL CALLING: When calling a tool, you MUST output ONLY the tool call. DO NOT include ANY other text, preamble, or greetings before the tool call. Failure to follow this will break the system.
 """
-
 
 # ═══════════════════════════════════════════════════════════════
 # Agent Setup — Lazy Singleton (Groq / Llama-3)
 # ═══════════════════════════════════════════════════════════════
 
 _agent_executor = None
+_current_key_index = 0
 
 
-def get_agent_executor() -> typing.Any:
+def get_agent_executor(force_refresh: bool = False) -> typing.Any:
     """Returns a singleton AgentExecutor (lazy initialized).
+    
+    If force_refresh is True, it will recreate the executor (used for key rotation).
 
     All heavy LangChain imports happen here, NOT at module level,
     to keep the startup memory footprint minimal.
 
     Uses Groq (Llama-3) for high-speed inference.
     """
-    global _agent_executor
-    if _agent_executor is not None:
+    global _agent_executor, _current_key_index
+    if _agent_executor is not None and not force_refresh:
         return _agent_executor
 
     from langchain_groq import ChatGroq
@@ -116,16 +78,19 @@ def get_agent_executor() -> typing.Any:
     from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
     from app.agent.tools import ALL_TOOLS
 
-    if not settings.GROQ_API_KEY:
-        raise RuntimeError(
-            "GROQ_API_KEY is not set. Add it to your .env file. "
-            "Get a free key at https://console.groq.com/"
-        )
+    # Select API key from rotation pool
+    keys = settings.get_groq_keys()
+    if not keys:
+        raise RuntimeError("No GROQ_API_KEYs found in configuration.")
+    
+    # Ensure index is within bounds (handles pool shrinking)
+    _current_key_index = _current_key_index % len(keys)
+    selected_key = keys[_current_key_index]
 
     # Initialize the LLM — Groq Llama-3
     llm = ChatGroq(
         model=settings.GROQ_MODEL,
-        api_key=settings.GROQ_API_KEY,
+        api_key=selected_key,
         temperature=settings.LLM_TEMPERATURE,
         max_tokens=2048,
     )
@@ -145,12 +110,13 @@ def get_agent_executor() -> typing.Any:
         agent=agent,
         tools=ALL_TOOLS,
         verbose=True,
-        handle_parsing_errors=True,
-        max_iterations=6,
+        handle_parsing_errors="Check your output format! If you have no more tools to call, output your final answer directly. DO NOT repeat tool calls.",
+        max_iterations=3,
+        early_stopping_method="force",
         return_intermediate_steps=True,
     )
 
-    logger.info("✅ LangChain AgentExecutor initialized (Groq/Llama-3, lazy singleton)")
+    logger.info(" LangChain AgentExecutor initialized (Groq/Llama-3, lazy singleton)")
     return _agent_executor
 
 
@@ -216,6 +182,51 @@ def _build_multimodal_input(
     )
 
 
+def _process_and_cache_response(query: str, raw_output: str) -> str:
+    """
+    Detects [KNOWLEDGE_CACHE] tag, cleans it, and saves to vector db if present.
+    """
+    CACHE_TAG = "[KNOWLEDGE_CACHE]"
+    if CACHE_TAG in raw_output:
+        # Clean the output
+        clean_output = raw_output.replace(CACHE_TAG, "").strip()
+        
+        # Save to cache (async-safe call to sync tool function)
+        try:
+            from app.agent.tools import save_to_vector_db
+            save_to_vector_db(query, clean_output)
+        except Exception as e:
+            logger.error(f"Post-processing cache error: {e}")
+            
+        return clean_output
+    return raw_output
+
+
+async def _run_fallback_llm(query: str, enhanced_input: str, reason: str) -> str:
+    """Helper to call LLM directly when agent fails or loops."""
+    logger.warning(f"Agent fallback triggered ({reason}) for query: {query}")
+    
+    fallback_prompt = (
+        f"The medical search system encountered a technical issue or returned no results. "
+        f"Please answer this query using your internal clinical knowledge as a specialist: {enhanced_input}. "
+        f"IMPORTANT: You MUST start your response with the exact tag [KNOWLEDGE_CACHE] so I can index this answer."
+    )
+    
+    from langchain_groq import ChatGroq
+    keys = settings.get_groq_keys()
+    selected_key = keys[_current_key_index % len(keys)]
+    direct_llm = ChatGroq(model=settings.GROQ_MODEL, api_key=selected_key, temperature=0.2)
+    
+    res = await direct_llm.ainvoke(fallback_prompt)
+    content = res.content
+    
+    # Ensure tag is present if model forgot
+    if "[KNOWLEDGE_CACHE]" not in content:
+        content = f"[KNOWLEDGE_CACHE] {content}"
+        
+    return content
+
+
 async def run_agent(
     query: str | None = None,
     chat_history: list | None = None,
@@ -265,14 +276,50 @@ async def run_agent(
         })
     except Exception as e:
         err_str = str(e)
-        # Surface quota exhaustion as a clean ValueError the router can handle
+        # Check if this is a quota/rate limit error
         if any(sig in err_str for sig in _QUOTA_SIGNALS):
+            global _current_key_index
+            keys = settings.get_groq_keys()
+            
+            # If we have multiple keys, try the next one
+            if len(keys) > 1:
+                _current_key_index += 1
+                logger.warning(f"Groq Quota Exhausted. Rotating to key index {_current_key_index % len(keys)}")
+                
+                # Re-initialize with new key and retry ONCE
+                new_executor = get_agent_executor(force_refresh=True)
+                result = await new_executor.ainvoke({
+                    "input": enhanced_input,
+                    "chat_history": lc_history,
+                    "patient_context": patient_context,
+                })
+                
+                # Process and cache the response
+                final_output = _process_and_cache_response(query or "Patient medical query", result["output"])
+                
+                # After successful retry, process and return immediately
+                return {
+                    "output": final_output,
+                    "tools_used": list(set([
+                        step[0].tool for step in result.get("intermediate_steps", [])
+                        if step and len(step) >= 1 and hasattr(step[0], "tool")
+                    ])),
+                }
+
+            # If only one key exists, surface the original error
             raise ValueError(
                 "The AI agent's API quota has been exhausted. "
                 "Please wait a moment before retrying, "
                 "or check your GROQ_API_KEY usage at https://console.groq.com/"
             ) from e
-        raise  # preserve original traceback for unexpected errors
+        if "Failed to call a function" in err_str:
+            fallback_output = await _run_fallback_llm(query, enhanced_input, "Tool Call Error")
+            final_output = _process_and_cache_response(query or "Patient query", fallback_output)
+            return {
+                "output": final_output,
+                "tools_used": ["search_medical_guidelines (failed)"],
+            }
+        raise
 
     # Extract which tools were used
     tools_used = []
@@ -282,7 +329,15 @@ async def run_agent(
             if hasattr(action, "tool"):
                 tools_used.append(action.tool)
 
+    # ── Emergency Fallback for Loops ──
+    if "max iterations" in result.get("output", "").lower():
+        fallback_output = await _run_fallback_llm(query, enhanced_input, "Agent Loop")
+        result["output"] = fallback_output
+
+    # Process and cache the response
+    final_output = _process_and_cache_response(query or "Patient medical query", result["output"])
+
     return {
-        "output": result["output"],
+        "output": final_output,
         "tools_used": list(set(tools_used)),
     }

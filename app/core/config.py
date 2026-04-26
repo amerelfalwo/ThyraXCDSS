@@ -13,8 +13,15 @@ class Settings(BaseSettings):
 
     # ── Groq LLM (Primary) ──
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_API_KEY_2: str = ""
+    GROQ_API_KEY_3: str = ""
+    GROQ_MODEL: str = "llama-3.1-8b-instant"
     LLM_TEMPERATURE: float = 0.1
+
+    def get_groq_keys(self) -> list[str]:
+        """Returns a list of all configured Groq API keys."""
+        keys = [self.GROQ_API_KEY, self.GROQ_API_KEY_2, self.GROQ_API_KEY_3]
+        return [k for k in keys if k and k.strip()]
 
     # ── Internal Service Auth ──
     INTERNAL_SERVICE_KEY: str = ""
@@ -24,6 +31,7 @@ class Settings(BaseSettings):
         Path(__file__).resolve().parent.parent.parent / "data"
     )
     CHROMA_GUIDELINES_COLLECTION: str = "pdf_documents"
+    CHROMA_CACHE_COLLECTION: str = "semantic_cache"
 
     # ── Embeddings ──
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
