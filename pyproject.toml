@@ -28,15 +28,8 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "python-dotenv>=1.0.0",
     # ── Frontend ──
-    # ── NEW: Vision OCR & Validation ──
-    "anthropic>=0.25.0",
-    "langchain-google-genai>=4.2.1",
-    "google-generativeai>=0.8.6",
-    "httpx>=0.28.1",
-    "pytest>=9.0.3",
     # ── NEW: In-Memory TTL Cache ──
     "cachetools>=5.3.0",
     "pillow>=12.2.0",
-    "pytesseract>=0.3.13",
     "ddgs>=9.14.1",
 ]
