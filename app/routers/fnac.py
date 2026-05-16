@@ -14,12 +14,14 @@ Clinical Standards:
 
 import logging
 import numpy as np
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.concurrency import run_in_threadpool
 
 from app.core.security import verify_internal_api_key
 from app.schemas.fnac import FnacPredictionResponse
+from app.services.vision_explanation import generate_vision_explanation
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,26 @@ router = APIRouter(
     tags=["FNAC Cytopathology"],
     dependencies=[Depends(verify_internal_api_key)],
 )
+
+MULTI_IMAGE_REQUEST_BODY = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "type": "array",
+                            "items": {"type": "string", "format": "binary"},
+                        }
+                    },
+                    "required": ["files"],
+                }
+            }
+        },
+    }
+}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -184,9 +206,13 @@ def _run_fnac_classification(image_bytes: bytes) -> dict:
 # Endpoint
 # ═══════════════════════════════════════════════════════════════
 
-@router.post("/predict", response_model=FnacPredictionResponse)
+@router.post(
+    "/predict",
+    response_model=List[FnacPredictionResponse],
+    openapi_extra=MULTI_IMAGE_REQUEST_BODY,
+)
 async def predict_fnac(
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(..., description="Upload multiple images"),
     session_id: str = Form(default=None),
 ):
     """
@@ -199,60 +225,114 @@ async def predict_fnac(
     If `session_id` is provided, the result is pushed to the
     Patient State Manager for correlation with other diagnostic nodes.
     """
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Invalid file type. Please upload an image.")
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded. Please attach at least one image.")
 
-    try:
-        image_bytes = await file.read()
+    results: List[FnacPredictionResponse] = []
 
-        # ── 1. Classification ──
+    for file in files:
+        if not file.content_type or not file.content_type.startswith("image/"):
+            results.append(
+                FnacPredictionResponse(
+                    filename=file.filename,
+                    status="error",
+                    message="Invalid file type. Please upload an image.",
+                    session_id=session_id,
+                )
+            )
+            continue
+
         try:
-            result = await run_in_threadpool(_run_fnac_classification, image_bytes)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"FNAC classification model error: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=503,
-                detail=f"The FNAC classification model failed to run: {str(e)}. Please check if model file is valid."
+            image_bytes = await file.read()
+
+            # ── 1. Classification ──
+            try:
+                result = await run_in_threadpool(_run_fnac_classification, image_bytes)
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"FNAC classification model error: {e}", exc_info=True)
+                results.append(
+                    FnacPredictionResponse(
+                        filename=file.filename,
+                        status="error",
+                        message=(
+                            f"The FNAC classification model failed to run: {str(e)}. "
+                            "Please check if model file is valid."
+                        ),
+                        session_id=session_id,
+                    )
+                )
+                continue
+
+            # ── LLM explanation of deterministic results ──
+            key_findings = (
+                f"{result['bethesda_label']}; "
+                f"Malignancy Risk: {result['malignancy_risk']}"
+            )
+            model_confidence = f"{result['confidence_pct']:.2f}%"
+            system_recommendation = result.get("recommendation", "")
+            ai_recommendation = None
+            if system_recommendation:
+                ai_recommendation = await generate_vision_explanation(
+                    analysis_type="FNAC Cytopathology (Bethesda System)",
+                    key_findings=key_findings,
+                    model_confidence=model_confidence,
+                    system_recommendation=system_recommendation,
+                )
+
+            # ── Push to Patient State ──
+            if session_id:
+                from app.services.patient_state import state_manager
+                state_manager.update_fnac(session_id, result)
+
+            # ── Audit Log ──
+            from app.core.audit import log_audit_event
+            log_audit_event(
+                node="fnac_predict",
+                action="bethesda_classification",
+                result=result["bethesda_label"],
+                confidence=result["confidence_pct"] / 100.0,
+                metadata={
+                    "bethesda_category": result["bethesda_category"],
+                    "malignancy_risk": result["malignancy_risk"],
+                    "needs_manual_review": result["needs_manual_review"],
+                    "session_id": session_id,
+                    "filename": file.filename,
+                },
             )
 
-        # ── Push to Patient State ──
-        if session_id:
-            from app.services.patient_state import state_manager
-            state_manager.update_fnac(session_id, result)
+            results.append(
+                FnacPredictionResponse(
+                    filename=file.filename,
+                    status="success",
+                    ai_recommendation=ai_recommendation,
+                    classification=result,
+                    session_id=session_id,
+                )
+            )
 
-        # ── Audit Log ──
-        from app.core.audit import log_audit_event
-        log_audit_event(
-            node="fnac_predict",
-            action="bethesda_classification",
-            result=result["bethesda_label"],
-            confidence=result["confidence_pct"] / 100.0,
-            metadata={
-                "bethesda_category": result["bethesda_category"],
-                "malignancy_risk": result["malignancy_risk"],
-                "needs_manual_review": result["needs_manual_review"],
-                "session_id": session_id,
-            },
-        )
+        except FileNotFoundError as e:
+            results.append(
+                FnacPredictionResponse(
+                    filename=file.filename,
+                    status="error",
+                    message=(
+                        f"FNAC ONNX model not found: {e}. "
+                        "The model file 'models/compressed/efficientnet_b4_medical_final.onnx' might be missing."
+                    ),
+                    session_id=session_id,
+                )
+            )
+        except Exception as e:
+            logger.error(f"FNAC processing error: {e}", exc_info=True)
+            results.append(
+                FnacPredictionResponse(
+                    filename=file.filename,
+                    status="error",
+                    message=f"FNAC classification error: {str(e)}",
+                    session_id=session_id,
+                )
+            )
 
-        return FnacPredictionResponse(
-            status="success",
-            classification=result,
-            session_id=session_id,
-        )
-
-    except HTTPException:
-        raise
-    except FileNotFoundError as e:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"FNAC ONNX model not found: {e}. "
-                "The model file 'models/compressed/efficientnet_b4_medical_final.onnx' might be missing."
-            ),
-        )
-    except Exception as e:
-        logger.error(f"FNAC processing error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"FNAC classification error: {str(e)}")
+    return results

@@ -78,8 +78,6 @@ app = FastAPI(
         "## Context Orchestration\n"
         "- `GET /state/{session_id}` — Retrieve patient diagnostic context\n"
         "- `DELETE /state/{session_id}` — Clear patient session\n\n"
-        "## Utility\n"
-        "- `POST /document/ocr` — Local Tesseract OCR for medical documents\n\n"
         "## Production Features\n"
         "- Groq/Llama-3 Agent, Dynamic Patient State, Circuit Breaker, Audit Logging\n"
     ),
@@ -106,13 +104,12 @@ app.mount("/media", StaticFiles(directory="media"), name="media")
 # Register Routers — All Nodes
 # ═══════════════════════════════════════════════════════════════
 
-from app.routers import chat, clinical, image, document, fnac
+from app.routers import chat, clinical, image, fnac
 
 app.include_router(clinical.router)
 app.include_router(image.router)
 app.include_router(fnac.router)
 app.include_router(chat.router)
-app.include_router(document.router)
 
 
 # ═══════════════════════════════════════════════════════════════

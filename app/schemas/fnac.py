@@ -72,7 +72,9 @@ class FnacClassificationResult(BaseModel):
 
 class FnacPredictionResponse(BaseModel):
     """Full response from the FNAC cytopathology classification pipeline."""
+    filename: Optional[str] = None
     status: str
+    ai_recommendation: Optional[str] = None
     classification: Optional[FnacClassificationResult] = None
     message: Optional[str] = None
     session_id: Optional[str] = None

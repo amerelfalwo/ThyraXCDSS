@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 # ── Global caches (lazily populated, bounded) ──────────────────
 # Max 128 entries, 10-minute TTL — keeps RAM under control
 _symptoms_cache: TTLCache = TTLCache(maxsize=128, ttl=600)
-_ocr_cache: TTLCache = TTLCache(maxsize=64, ttl=600)
 
 
 def _hash_key(*args: Any) -> str:
@@ -32,11 +31,6 @@ def _hash_key(*args: Any) -> str:
 def get_symptoms_cache() -> TTLCache:
     """Return the shared symptoms analysis cache."""
     return _symptoms_cache
-
-
-def get_ocr_cache() -> TTLCache:
-    """Return the shared OCR analysis cache."""
-    return _ocr_cache
 
 
 def cache_key_for_text(text: str) -> str:

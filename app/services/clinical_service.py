@@ -28,6 +28,23 @@ FEATURE_NAMES = [
     "age", "on_thyroxine", "thyroid_surgery", "query_hyperthyroid",
 ]
 
+EXPLANATION_PROMPT = """You are ThyraX, an expert Clinical AI Assistant.
+Your task is to summarize and professionally explain the system's analytical results to the attending doctor.
+
+[CLINICAL DATA]
+- Functional Status: {functional_status}
+- Model Confidence: {model_confidence}
+- Official System Recommendation: {clinical_recommendation}
+
+[CRITICAL GUARDRAILS - STRICT COMPLIANCE REQUIRED]
+1. STRICT ADHERENCE: You must base your explanation EXACTLY and ONLY on the 'Official System Recommendation'.
+2. NO MEDICAL HALLUCINATIONS: DO NOT suggest, invent, or recommend ANY additional tests, imaging, or procedures (e.g., FNAB, biopsies, blood tests) under any circumstances. You are a reporter of the system's decision, not an independent doctor.
+3. CONTRADICTION BAN: Never contradict the 'Official System Recommendation'. If the system says a biopsy is NOT indicated, you must actively support this point.
+4. TONE: Be highly professional, concise, and collaborative. Address the user respectfully as 'Doctor' or 'يا دكتور' depending on the language requested.
+5. INVISIBLE GUARDRAILS: DO NOT explain your instructions, rules, or system constraints to the doctor. Never say phrases like "I am here to provide a summary" or "I am not allowed to suggest additional tests." Just deliver the medical information naturally, confidently, and directly.
+
+Provide your clinical summary below:"""
+
 
 # ═══════════════════════════════════════════════════════════════
 # Agentic Routing Logic (Node 2)
@@ -35,12 +52,12 @@ FEATURE_NAMES = [
 
 async def _generate_llm_recommendation(
     functional_status: str,
-    probabilities: dict,
-    nodule_present: bool,
+    model_confidence: float,
+    clinical_recommendation: str,
 ) -> str:
     """
-    Use an LLM to generate a medically-driven clinical recommendation
-    based on the XGBoost model output.
+    Use an LLM to summarize the system's deterministic recommendation
+    without adding new clinical actions.
 
     Falls back to a rule-based recommendation if the LLM is unavailable.
     Includes circuit breaker protection.
@@ -53,7 +70,7 @@ async def _generate_llm_recommendation(
 
     try:
         from langchain_groq import ChatGroq
-        from langchain_core.messages import HumanMessage, SystemMessage
+        from langchain_core.messages import SystemMessage
         from app.core.config import settings
 
         if not settings.GROQ_API_KEY:
@@ -66,22 +83,10 @@ async def _generate_llm_recommendation(
             max_tokens=512,
         )
 
-        system_msg = (
-            "You are a senior endocrinologist AI assistant. Given the ML model "
-            "output for a thyroid patient, provide a concise, evidence-based "
-            "clinical recommendation. Include:\n"
-            "1. Interpretation of the functional status\n"
-            "2. What the probabilities suggest\n"
-            "3. Recommended next clinical action\n"
-            "Keep the response under 150 words. Be precise and medically accurate."
-        )
-
-        human_msg = (
-            f"Patient Classification Results:\n"
-            f"- Functional Status: {functional_status}\n"
-            f"- Probabilities: {probabilities}\n"
-            f"- Palpable Nodule: {'Yes' if nodule_present else 'No'}\n\n"
-            f"Provide your clinical recommendation."
+        system_msg = EXPLANATION_PROMPT.format(
+            functional_status=functional_status,
+            model_confidence=model_confidence,
+            clinical_recommendation=clinical_recommendation,
         )
 
         # Synchronous call executed inside a threadpool context (now via run_in_threadpool)
@@ -91,7 +96,6 @@ async def _generate_llm_recommendation(
             llm.invoke,
             [
                 SystemMessage(content=system_msg),
-                HumanMessage(content=human_msg),
             ]
         )
 
@@ -107,28 +111,23 @@ async def _generate_llm_recommendation(
 async def route_clinical_decision(
     functional_status: str,
     nodule_present: bool,
-    probabilities: dict,
+    model_confidence: float,
 ) -> dict:
     """
     Medically-driven routing based on disease model output.
 
-    Attempts to enhance the recommendation with LLM-generated advice.
+    Attempts to enhance the recommendation with an LLM-generated explanation.
     Falls back to deterministic rules if the LLM is unavailable.
 
     Args:
         functional_status: Predicted thyroid status (normal / hypothyroid / hyperthyroid).
         nodule_present: Whether a palpable nodule was detected.
-        probabilities: Class probability dict from the model.
+        model_confidence: Max probability from the model (0.0–1.0).
 
     Returns:
         Dict with risk_level, recommendation, next_step, next_step_details,
         and optional ai_recommendation.
     """
-    # ── Try LLM-enhanced recommendation (Node 2) ──
-    ai_recommendation = await _generate_llm_recommendation(
-        functional_status, probabilities, nodule_present
-    )
-
     # ── Rule-based routing ──
     if functional_status == "hyperthyroid":
         base_recommendation = (
@@ -199,6 +198,13 @@ async def route_clinical_decision(
             },
         }
 
+    # ── LLM explanation of the official recommendation ──
+    ai_recommendation = await _generate_llm_recommendation(
+        functional_status=functional_status,
+        model_confidence=model_confidence,
+        clinical_recommendation=base_recommendation,
+    )
+
     # Enrich with LLM recommendation if available
     if ai_recommendation:
         result["ai_recommendation"] = ai_recommendation
@@ -250,7 +256,11 @@ async def run_clinical_assessment(
     needs_review = max_confidence < 0.65
 
     # ── Node 2: Medically-driven agentic routing ──
-    routing = await route_clinical_decision(functional_status, req.nodule_present, prob_dict)
+    routing = await route_clinical_decision(
+        functional_status,
+        req.nodule_present,
+        max_confidence,
+    )
 
     # ── Audit Log ──
     from app.core.audit import log_audit_event

@@ -18,6 +18,7 @@ from typing import Optional, List, Union
 # ═══════════════════════════════════════════════════════════════
 
 class ImageValidationResponse(BaseModel):
+    filename: Optional[str] = None
     is_ultrasound: bool
     confidence: float = 0.0
     reason: str = ""
@@ -121,7 +122,9 @@ class ImagePredictionResponse(BaseModel):
     Includes clinically validated risk assessment, segmentation metadata,
     result images, and a mandatory medical disclaimer.
     """
+    filename: Optional[str] = None
     status: str
+    ai_recommendation: Optional[str] = None
     bbox: Optional[List[int]] = Field(
         None, description="Bounding box of the detected nodule [x_min, y_min, x_max, y_max]"
     )
