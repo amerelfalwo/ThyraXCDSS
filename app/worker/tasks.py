@@ -1,12 +1,13 @@
 import json
 import logging
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from celery import shared_task
 from sqlalchemy import select
 
 from app.core.celery_app import celery_app
-from app.core.database import SessionLocal
+from app.core.database import AsyncSessionLocal
 from app.schemas.memory_models import Session as DbSession, AuditLog
 from app.core.config import settings
 
@@ -24,20 +25,15 @@ def process_vector_embeddings(text: str, document_id: str):
     logger.info(f"Successfully processed and stored embeddings for {document_id}")
     return {"status": "success", "doc_id": document_id}
 
-@shared_task(name="app.worker.tasks.evaluate_weekly_hallucinations")
-def evaluate_weekly_hallucinations():
-    """
-    Phase 4: Periodic Celery Beat task.
-    Evaluates LLM responses from the past 7 days against ground truth using an LLM-as-a-Judge.
-    """
-    logger.info("Running weekly hallucination evaluation task...")
+async def _run_weekly_evaluation():
+    logger.info("Running weekly hallucination evaluation task (async mode)...")
     
-    db = SessionLocal()
-    try:
+    async with AsyncSessionLocal() as db:
         seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
         
         stmt = select(DbSession).where(DbSession.created_at >= seven_days_ago)
-        recent_sessions = db.execute(stmt).scalars().all()
+        result = await db.execute(stmt)
+        recent_sessions = result.scalars().all()
         
         if not recent_sessions:
             logger.info("No recent sessions found for evaluation.")
@@ -81,12 +77,12 @@ def evaluate_weekly_hallucinations():
                     {"role": "system", "content": evaluation_prompt.replace("{context}", context_str)}
                 ]
                 
-                response = llm.invoke(messages)
+                response = await llm.ainvoke(messages)
                 
                 try:
-                    result = json.loads(response.content)
-                    score = int(result.get("score", 0))
-                    reason = str(result.get("reason", "Parsing failed"))
+                    result_json = json.loads(response.content)
+                    score = int(result_json.get("score", 0))
+                    reason = str(result_json.get("reason", "Parsing failed"))
                 except (json.JSONDecodeError, ValueError) as e:
                     logger.error(f"Failed to parse LLM JSON for session {session.session_id}: {e}")
                     score = 0
@@ -104,9 +100,14 @@ def evaluate_weekly_hallucinations():
             except Exception as e:
                 logger.error(f"Error evaluating session {session.session_id}: {e}")
                 
-        db.commit()
+        await db.commit()
         logger.info(f"Completed hallucination evaluation for {evaluated_count} sessions.")
         return f"Evaluated {evaluated_count} sessions."
-        
-    finally:
-        db.close()
+
+@shared_task(name="app.worker.tasks.evaluate_weekly_hallucinations")
+def evaluate_weekly_hallucinations():
+    """
+    Phase 4: Periodic Celery Beat task.
+    Evaluates LLM responses from the past 7 days against ground truth using an LLM-as-a-Judge.
+    """
+    return asyncio.run(_run_weekly_evaluation())
