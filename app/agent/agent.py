@@ -58,8 +58,7 @@ CRITICAL: NEVER call a tool twice in a row. NEVER call a second tool. If the too
 _agent_executor = None
 _current_key_index = 0
 
-
-def get_agent_executor(force_refresh: bool = False) -> typing.Any:
+async def get_agent_executor(force_refresh: bool = False) -> typing.Any:
     """Returns a singleton AgentExecutor (lazy initialized).
     
     If force_refresh is True, it will recreate the executor (used for key rotation).
@@ -67,7 +66,8 @@ def get_agent_executor(force_refresh: bool = False) -> typing.Any:
     All heavy LangChain imports happen here, NOT at module level,
     to keep the startup memory footprint minimal.
 
-    Uses Groq (Llama-3) for high-speed inference.
+    Uses Groq (Llama-3) for high-speed inference and MCP protocol for tools.
+    Tools are loaded from multiple MCP servers via the MCPClientManager.
     """
     global _agent_executor, _current_key_index
     if _agent_executor is not None and not force_refresh:
@@ -76,7 +76,13 @@ def get_agent_executor(force_refresh: bool = False) -> typing.Any:
     from langchain_groq import ChatGroq
     from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
     from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-    from app.agent.tools import ALL_TOOLS
+    from app.agent.mcp_servers.mcp_client import mcp_client_manager
+
+    # Load tools from all MCP servers (RAG + Web Search)
+    mcp_tools = await mcp_client_manager.get_all_tools()
+
+    if not mcp_tools:
+        logger.warning("No MCP tools loaded — agent will operate without tools")
 
     # Select API key from rotation pool
     keys = settings.get_groq_keys()
@@ -104,11 +110,11 @@ def get_agent_executor(force_refresh: bool = False) -> typing.Any:
     ])
 
     # Create the agent
-    agent = create_tool_calling_agent(llm, ALL_TOOLS, prompt)
+    agent = create_tool_calling_agent(llm, mcp_tools, prompt)
 
     _agent_executor = AgentExecutor(
         agent=agent,
-        tools=ALL_TOOLS,
+        tools=mcp_tools,
         verbose=True,
         handle_parsing_errors="Check your output format! If you have no more tools to call, output your final answer directly. DO NOT repeat tool calls.",
         max_iterations=3,
@@ -116,7 +122,7 @@ def get_agent_executor(force_refresh: bool = False) -> typing.Any:
         return_intermediate_steps=True,
     )
 
-    logger.info(" LangChain AgentExecutor initialized (Groq/Llama-3, lazy singleton)")
+    logger.info(" LangChain AgentExecutor initialized (Groq/Llama-3, MCP multi-server)")
     return _agent_executor
 
 
@@ -191,10 +197,10 @@ def _process_and_cache_response(query: str, raw_output: str) -> str:
         # Clean the output
         clean_output = raw_output.replace(CACHE_TAG, "").strip()
         
-        # Save to cache (async-safe call to sync tool function)
+        # Save to cache (direct call to RAG server function)
         try:
-            from app.agent.tools import save_to_vector_db
-            save_to_vector_db(query, clean_output)
+            from app.agent.mcp_servers.rag_server import save_to_knowledge_base
+            save_to_knowledge_base(query, clean_output)
         except Exception as e:
             logger.error(f"Post-processing cache error: {e}")
             
@@ -227,16 +233,25 @@ async def _run_fallback_llm(query: str, enhanced_input: str, reason: str) -> str
     return content
 
 
+
+
 async def run_agent(
     query: str | None = None,
     chat_history: list | None = None,
     image_base64: str | None = None,
     image_content_type: str | None = None,
     session_id: str | None = None,
+    patient_id: str | None = None,
 ) -> dict:
     """
     Run the ThyraX agent with the given query, conversation history,
     and patient context.
+
+    Uses the Dual-State Memory Manager to:
+      1. Load merged long-term + short-term context.
+      2. Inject it into the LLM prompt.
+      3. Persist the exchange after the agent responds.
+      4. Trigger memory summarization when the history grows long.
 
     Args:
         query: The medical question to answer (optional if image provided).
@@ -245,26 +260,40 @@ async def run_agent(
         image_base64: Optional base64-encoded image for multi-modal analysis.
         image_content_type: MIME type of the attached image.
         session_id: Optional session ID to retrieve patient context.
+        patient_id: Optional patient ID for long-term memory retrieval.
 
     Returns:
         dict with 'output' (the agent's response) and 'tools_used'
         (list of tool names invoked).
     """
-    executor = get_agent_executor()
+    executor = await get_agent_executor()
 
-    # Convert raw history dicts to LangChain message objects
-    lc_history = _convert_chat_history(chat_history or [])
+    # ── Load Dual-State Memory Context ──
+    patient_context = "No patient context available for this session."
+    effective_history = chat_history or []
+
+    if session_id:
+        from app.services.memory_manager import memory_manager
+
+        try:
+            memory_ctx = await memory_manager.load_context(
+                session_id=session_id,
+                patient_id=patient_id,
+            )
+            patient_context = memory_ctx.to_prompt_context()
+            # Use server-stored history if available, else fallback to client-sent
+            if memory_ctx.chat_history:
+                effective_history = memory_ctx.chat_history
+        except Exception as e:
+            logger.error(f"Memory load failed: {e}")
+            patient_context = "Memory load failed. No patient context available."
+
+    lc_history = _convert_chat_history(effective_history)
 
     # Build multi-modal or plain text input
     enhanced_input = _build_multimodal_input(
         query, image_base64, image_content_type
     )
-
-    # ── Retrieve patient context from State Manager ──
-    patient_context = "No patient context available for this session."
-    if session_id:
-        from app.services.patient_state import state_manager
-        patient_context = state_manager.get_state_summary(session_id)
 
     _QUOTA_SIGNALS = ("429", "RESOURCE_EXHAUSTED", "rate_limit", "Too Many Requests")
 
@@ -287,7 +316,7 @@ async def run_agent(
                 logger.warning(f"Groq Quota Exhausted. Rotating to key index {_current_key_index % len(keys)}")
                 
                 # Re-initialize with new key and retry ONCE
-                new_executor = get_agent_executor(force_refresh=True)
+                new_executor = await get_agent_executor(force_refresh=True)
                 result = await new_executor.ainvoke({
                     "input": enhanced_input,
                     "chat_history": lc_history,
@@ -337,7 +366,32 @@ async def run_agent(
     # Process and cache the response
     final_output = _process_and_cache_response(query or "Patient medical query", result["output"])
 
+    # ── Persist exchange to Dual-State Memory ──
+    if session_id:
+        import asyncio
+        from app.services.memory_manager import memory_manager
+
+        try:
+            await memory_manager.save_exchange(
+                session_id=session_id,
+                user_message=query or "Image analysis request",
+                ai_response=final_output,
+            )
+        except Exception as e:
+            logger.error(f"Failed to save exchange to memory: {e}")
+
+        # Trigger async summarization if history grows large
+        try:
+            ctx = await memory_manager.load_context(session_id)
+            if len(ctx.chat_history) > 6:
+                asyncio.create_task(
+                    memory_manager.summarize_and_prune(session_id)
+                )
+        except Exception as e:
+            logger.warning(f"Summarization trigger failed: {e}")
+
     return {
         "output": final_output,
         "tools_used": list(set(tools_used)),
     }
+

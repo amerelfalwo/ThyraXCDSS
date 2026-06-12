@@ -72,6 +72,14 @@ class ChatRequest(BaseModel):
         return self
 
 
+class AgentChatRequest(BaseModel):
+    """JSON payload for Phase 3 refactored agent chat."""
+    patient_id: int
+    session_id: str
+    doctor_id: int
+    user_message: str
+
+
 class ChatResponse(BaseModel):
     """Response from the ThyraX AI agent."""
     status: str

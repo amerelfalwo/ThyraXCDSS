@@ -26,9 +26,14 @@ from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+import datetime
 
 from app.core.security import verify_internal_api_key
-from app.schemas.chat import ChatResponse
+from app.core.database import get_db
+from app.core.config import settings
+from app.schemas.chat import ChatResponse, AgentChatRequest
 from app.agent.agent import run_agent
 
 logger = logging.getLogger(__name__)
@@ -162,6 +167,47 @@ def _get_effective_query(query: str | None, has_image: bool) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
+# Conversation Persistence Helper
+# ═══════════════════════════════════════════════════════════════
+
+async def _persist_conversation(
+    session_id: str,
+    user_message: str,
+    assistant_response: str,
+) -> None:
+    """
+    Append user + assistant messages to ``sessions.conversation_history``.
+
+    Uses a **fresh** ``AsyncSession`` (not the request-scoped one) so that
+    the write succeeds even after FastAPI has closed the DI session.
+    """
+    from app.core.database import AsyncSessionLocal
+    from app.schemas.memory_models import Session as SessionModel
+
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(SessionModel).where(SessionModel.session_id == session_id)
+        )
+        session = result.scalar_one_or_none()
+        if not session:
+            logger.warning(f"Session {session_id} not found — skipping persistence.")
+            return
+
+        history = list(session.conversation_history or [])
+        history.append({"role": "user", "content": user_message, "ts": now_iso})
+        history.append({"role": "assistant", "content": assistant_response, "ts": now_iso})
+
+        session.conversation_history = history
+        await db.commit()
+        logger.info(
+            f"Persisted conversation for session {session_id} "
+            f"({len(history)} messages total)."
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
 # Streaming Generator
 # ═══════════════════════════════════════════════════════════════
 
@@ -174,6 +220,11 @@ async def _stream_agent_response(
 ):
     """
     Generator that runs the agent and yields the response as SSE.
+
+    After the stream completes successfully, the full user message and
+    accumulated assistant response are persisted to the ``sessions``
+    table's ``conversation_history`` JSONB column via a fresh
+    ``AsyncSession``.
     """
     from app.core.circuit_breaker import is_circuit_open, record_success, record_failure
     from app.core.audit import log_audit_event
@@ -246,6 +297,20 @@ async def _stream_agent_response(
                 "tools_used": result["tools_used"],
             })
             yield f"data: {payload}\n\n"
+
+            # ── Persist conversation to sessions table ──
+            if session_id and output_text:
+                try:
+                    await _persist_conversation(
+                        session_id=session_id,
+                        user_message=effective_query,
+                        assistant_response=output_text,
+                    )
+                except Exception as persist_err:
+                    logger.error(
+                        f"Failed to persist conversation for session {session_id}: {persist_err}",
+                        exc_info=True,
+                    )
             return
 
         except Exception as e:
@@ -332,134 +397,88 @@ async def agent_chat_stream(
     )
 
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat")
 async def agent_chat(
-    query: Optional[str] = Form(None),
-    session_id: Optional[str] = Form(None),
-    chat_history: str = Form("[]"),
-    image: Optional[UploadFile] = File(None),
+    request: AgentChatRequest,
+    db: AsyncSession = Depends(get_db)
 ):
     """
-    Chat with the ThyraX AI medical assistant (Node 5).
-    Now supports multipart/form-data for direct file uploads.
+    Refactored chat endpoint for Phase 4.
+    Accepts JSON payload with patient_id, session_id, doctor_id, and user_message.
+    Validates data isolation, fetches memory context, and streams Groq LLM response.
     """
-    # Parse chat_history
-    try:
-        history_list = json.loads(chat_history)
-    except Exception:
-        history_list = []
+    from app.schemas.memory_models import Session as SessionModel, Patient
+    from app.services.memory_manager import memory_manager
+    from langchain_groq import ChatGroq
+    from langchain_core.messages import SystemMessage, HumanMessage
 
-    # Process image
-    image_base64 = None
-    image_content_type = None
-    if image:
-        image_bytes = await image.read()
-        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-        image_content_type = image.content_type
+    patient_id_str = str(request.patient_id)
+    doctor_id_str = str(request.doctor_id)
 
-    effective_query = _get_effective_query(query, bool(image_base64))
+    # 1. Validate data isolation
+    patient_result = await db.execute(
+        select(Patient).where(Patient.patient_id == patient_id_str, Patient.doctor_id == doctor_id_str)
+    )
+    patient = patient_result.scalar_one_or_none()
 
-    # ── Medical Guardrail Pre-filter ──
-    if query and not _is_medical_query(query):
-        logger.info(f"Non-medical query rejected: {query[:80]}...")
-        return ChatResponse(
-            status="rejected",
-            query=query,
-            response=_get_rejection_message(query),
-            tools_used=[],
-        )
+    session_result = await db.execute(
+        select(SessionModel).where(SessionModel.session_id == request.session_id, SessionModel.doctor_id == doctor_id_str)
+    )
+    session = session_result.scalar_one_or_none()
 
-    from app.core.circuit_breaker import is_circuit_open, record_success, record_failure
-    from app.core.audit import log_audit_event
-    import asyncio
-
-    if is_circuit_open("agent_chat"):
+    if not patient or not session:
         raise HTTPException(
-            status_code=503,
-            detail="AI service temporarily unavailable (circuit breaker open). Retrying in ~2 minutes.",
+            status_code=403, 
+            detail="Forbidden: Patient or Session does not belong to the provided Doctor."
         )
 
-    MAX_RETRIES = 3
-    RETRY_DELAYS = [5, 15, 30]
-    last_error: Exception | None = None
+    # 2. Fetch context
+    system_prompt = await memory_manager.get_injected_context(request.patient_id, request.session_id, db)
 
-    for attempt in range(MAX_RETRIES):
+    # 3. Call Groq LLM
+    keys = settings.get_groq_keys()
+    if not keys:
+        raise HTTPException(status_code=500, detail="No GROQ_API_KEYs found in configuration.")
+    
+    llm = ChatGroq(model=settings.GROQ_MODEL, api_key=keys[0], temperature=settings.LLM_TEMPERATURE)
+    
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=request.user_message)
+    ]
+    
+    async def generate_response():
+        agent_response = ""
         try:
-            result = await run_agent(
-                query=query,
-                chat_history=history_list,
-                image_base64=image_base64,
-                image_content_type=image_content_type,
-                session_id=session_id,
+            async for chunk in llm.astream(messages):
+                if chunk.content:
+                    agent_response += chunk.content
+                    yield f"data: {json.dumps({'status': 'streaming', 'chunk': chunk.content})}\n\n"
+            
+            # Post-processing: Persist via fresh session (safe for generators)
+            await _persist_conversation(
+                session_id=request.session_id,
+                user_message=request.user_message,
+                assistant_response=agent_response,
             )
-
-            output_text = result["output"]
-            if isinstance(output_text, list):
-                output_text = "".join(
-                    block.get("text", "")
-                    for block in output_text
-                    if isinstance(block, dict)
-                )
-            elif not isinstance(output_text, str):
-                output_text = str(output_text)
-
-            record_success("agent_chat")
-
+            
+            # Also log audit event
+            from app.core.audit import log_audit_event
             log_audit_event(
-                node="agent_chat",
+                node="agent_chat_phase4",
                 action="agent_invocation",
-                result=output_text[:200],
+                result=agent_response[:200],
                 metadata={
-                    "query": effective_query[:200],
-                    "tools_used": result["tools_used"],
-                    "has_image": bool(image_base64),
-                    "session_id": session_id,
-                    "mode": "image_only" if not query else (
-                        "multimodal" if image_base64 else "text_only"
-                    ),
+                    "query": request.user_message[:200],
+                    "patient_id": request.patient_id,
+                    "session_id": request.session_id,
+                    "doctor_id": request.doctor_id
                 },
             )
-
-            return ChatResponse(
-                status="success",
-                query=query,
-                response=output_text,
-                tools_used=result["tools_used"],
-            )
-
+            
+            yield f"data: {json.dumps({'status': 'success', 'response': agent_response})}\n\n"
         except Exception as e:
-            last_error = e
-            error_str = str(e)
+            logger.error(f"Error during streaming: {e}")
+            yield f"data: {json.dumps({'status': 'error', 'detail': str(e)})}\n\n"
 
-            is_transient = any(
-                code in error_str
-                for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")
-            )
-
-            if is_transient and attempt < MAX_RETRIES - 1:
-                delay = RETRY_DELAYS[attempt]
-                logger.warning(
-                    f"Gemini transient error (attempt {attempt + 1}/{MAX_RETRIES}), "
-                    f"retrying in {delay}s: {error_str[:120]}"
-                )
-                await asyncio.sleep(delay)
-                continue
-
-            logger.error(f"Agent error: {e}", exc_info=True)
-            record_failure("agent_chat")
-            break
-
-    record_failure("agent_chat")
-    is_overload = any(
-        code in str(last_error)
-        for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")
-    )
-    if is_overload:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "The AI model is currently experiencing high demand. "
-                "Please try again in a moment."
-            ),
-        )
-    raise HTTPException(status_code=500, detail=f"Agent error: {last_error}")
+    return StreamingResponse(generate_response(), media_type="text/event-stream")

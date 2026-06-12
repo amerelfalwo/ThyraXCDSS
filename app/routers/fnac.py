@@ -281,10 +281,14 @@ async def predict_fnac(
                     system_recommendation=system_recommendation,
                 )
 
-            # ── Push to Patient State ──
+            # ── Push to Dual-State Memory Manager ──
             if session_id:
-                from app.services.patient_state import state_manager
-                state_manager.update_fnac(session_id, result)
+                from app.services.memory_manager import memory_manager
+                await memory_manager.save_diagnostic(
+                    session_id=session_id,
+                    node_type="fnac",
+                    data=result
+                )
 
             # ── Audit Log ──
             from app.core.audit import log_audit_event

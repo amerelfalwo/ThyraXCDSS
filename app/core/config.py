@@ -26,6 +26,21 @@ class Settings(BaseSettings):
     # ── Internal Service Auth ──
     INTERNAL_SERVICE_KEY: str = ""
 
+    # ── PostgreSQL Database ──
+    DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/thyrax"
+
+    @property
+    def ASYNC_DATABASE_URL(self) -> str:
+        """Derive the asyncpg URL from the sync DATABASE_URL."""
+        url = self.DATABASE_URL
+        if url.startswith("postgresql+asyncpg://"):
+            return url
+        if url.startswith("postgresql+psycopg2://"):
+            return url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
+        if url.startswith("postgresql://"):
+            return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return url
+
     # ── ChromaDB ──
     CHROMA_PERSIST_DIR: str = str(
         Path(__file__).resolve().parent.parent.parent / "data"

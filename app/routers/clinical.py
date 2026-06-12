@@ -46,17 +46,21 @@ async def assess_clinical(req: ClinicalAssessmentRequest):
         try:
             result = await run_clinical_assessment(req)
 
-            # ── Push to Patient State Manager ──
+            # ── Push to Dual-State Memory Manager ──
             if req.session_id:
-                from app.services.patient_state import state_manager
-                state_manager.update_clinical(req.session_id, {
-                    "functional_status": result.functional_status,
-                    "risk_level": result.risk_level,
-                    "probabilities": result.probabilities,
-                    "model_confidence": result.model_confidence,
-                    "clinical_recommendation": result.clinical_recommendation,
-                    "next_step": result.next_step,
-                })
+                from app.services.memory_manager import memory_manager
+                await memory_manager.save_diagnostic(
+                    session_id=req.session_id,
+                    node_type="clinical",
+                    data={
+                        "functional_status": result.functional_status,
+                        "risk_level": result.risk_level,
+                        "probabilities": result.probabilities,
+                        "model_confidence": result.model_confidence,
+                        "clinical_recommendation": result.clinical_recommendation,
+                        "next_step": result.next_step,
+                    }
+                )
 
             return result
 

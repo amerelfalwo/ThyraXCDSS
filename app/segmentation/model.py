@@ -34,27 +34,6 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 
-def save_image_to_media(image_np: np.ndarray, filename: str, base_url: str) -> str:
-    """
-    Save a NumPy image array to the media directory and return its public URL.
-
-    Args:
-        image_np: Image as a NumPy array (BGR format).
-        filename: Target filename (e.g. ``mask_<uuid>.png``).
-        base_url: Base URL of the running API server.
-
-    Returns:
-        Fully qualified public URL to the saved image.
-    """
-    media_dir = BASE_DIR / "media"
-    media_dir.mkdir(exist_ok=True)
-
-    filepath = media_dir / filename
-    cv2.imwrite(str(filepath), image_np)
-
-    return f"{base_url}media/{filename}"
-
-
 # ═══════════════════════════════════════════════════════════════
 # Risk Assessment — ACR TI-RADS Compliant Mapping
 # ═══════════════════════════════════════════════════════════════
@@ -275,13 +254,17 @@ def process_full_pipeline(
     unique_id = str(uuid.uuid4())
 
     # ────────────────────────────────────────────────────────────
-    # Phase 4: Save result images
+    # Phase 4: Prepare result images (in-memory bytes)
     # ────────────────────────────────────────────────────────────
-    mask_url = save_image_to_media(mask_full * 255, f"mask_{unique_id}.png", base_url)
+    # Convert mask_full to BGR so it encodes cleanly as color
+    mask_bgr = cv2.cvtColor(mask_full * 255, cv2.COLOR_GRAY2BGR)
+    _, mask_enc = cv2.imencode(".png", mask_bgr)
+    
     overlay_bgr = cv2.cvtColor(blended, cv2.COLOR_RGB2BGR)
-    overlay_url = save_image_to_media(overlay_bgr, f"overlay_{unique_id}.png", base_url)
+    _, overlay_enc = cv2.imencode(".png", overlay_bgr)
+    
     roi_bgr = cv2.cvtColor(roi, cv2.COLOR_RGB2BGR)
-    roi_url = save_image_to_media(roi_bgr, f"roi_{unique_id}.png", base_url)
+    _, roi_enc = cv2.imencode(".png", roi_bgr)
 
     # ────────────────────────────────────────────────────────────
     # Phase 5: Clinical risk assessment
@@ -308,8 +291,9 @@ def process_full_pipeline(
             "roi_extraction": "bounding_box_crop",
         },
         "images": {
-            "mask_url": mask_url,
-            "overlay_url": overlay_url,
-            "roi_url": roi_url,
+            "mask_bytes": mask_enc.tobytes(),
+            "overlay_bytes": overlay_enc.tobytes(),
+            "roi_bytes": roi_enc.tobytes(),
+            "unique_id": unique_id,
         },
     }

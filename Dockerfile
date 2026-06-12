@@ -1,46 +1,43 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
 
-# Install system dependencies required for OpenCV, etc.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libgl1 \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/app/.venv/bin:$PATH"
 
-# Install uv (ultra-fast package manager written in Rust)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
-# Set working directory
 WORKDIR /app
 
-# Enable bytecode compilation and virtual environment tracking for uv
-ENV UV_COMPILE_BYTECODE=1
-ENV UV_LINK_MODE=copy
+# Install system dependencies including Redis and RabbitMQ
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    libgl1 \
+    libglib2.0-0 \
+    redis-server \
+    rabbitmq-server \
+    && rm -rf /var/lib/apt/lists/*
 
+# Install uv globally
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+ENV PATH="/usr/local/bin:$PATH"
 
+# Copy dependency files
+COPY pyproject.toml uv.lock ./
 
-# Copy the dependency files first to maximize Docker caching
-COPY pyproject.toml uv.lock* ./
+# Install dependencies using uv sync
+RUN uv sync --frozen --no-install-project --no-dev
 
-# Sync dependencies into a virtual environment
-RUN uv sync --frozen --no-install-project --no-dev || uv sync --no-install-project --no-dev
+# Copy application source code
+COPY . /app
 
-# Add the virtual environment to PATH so we don't need to manually activate it
-ENV PATH="/app/.venv/bin:$PATH"
-ENV VIRTUAL_ENV="/app/.venv"
+# Ensure start.sh is executable
+RUN chmod +x /app/start.sh
 
+# Install project itself
+RUN uv sync --frozen --no-dev
 
-# Copy the rest of the application code
-COPY . .
-
-# Install the project itself
-RUN uv sync --no-dev
-
-# إعطاء صلاحيات القراءة والكتابة للمستخدم العادي (مهم جداً لـ Hugging Face)
-RUN chmod -R 777 /app
-
-# تغيير البورت لـ 7860
+# Expose the API port
 EXPOSE 7860
 
-# تشغيل uvicorn على بورت 7860
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port 7860 --workers 1"]
+# Start everything via the shell script
+CMD ["/app/start.sh"]

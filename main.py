@@ -57,6 +57,13 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # ── Graceful shutdown: close MCP server connections ──
+    try:
+        from app.agent.mcp_servers.mcp_client import mcp_client_manager
+        await mcp_client_manager.shutdown()
+    except Exception as e:
+        logger.warning(f"Error shutting down MCP servers: {e}")
+
     logger.info("ThyraX CDSS shutting down.")
 
 

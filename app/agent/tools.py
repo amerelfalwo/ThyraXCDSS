@@ -17,11 +17,13 @@ Features:
 import os
 import logging
 import numpy as np
-from langchain_core.tools import tool
+from mcp.server.fastmcp import FastMCP
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+mcp = FastMCP("ThyraX_Tools")
 
 # ═══════════════════════════════════════════════════════════════
 # Shared: Embedding Manager & ChromaDB Client (lazy loaded)
@@ -105,7 +107,7 @@ def _rerank_results(
 # Tool 1: Medical Guidelines RAG (Open Scope + Re-Ranking)
 # ═══════════════════════════════════════════════════════════════
 
-@tool
+@mcp.tool()
 def search_medical_guidelines(query: str) -> str:
     """
     Search the LOCAL medical knowledge base for clinical guidelines,
@@ -207,7 +209,7 @@ _MEDICAL_SITE_SUFFIXES = (
 )
 
 
-@tool
+@mcp.tool()
 def search_medical_web(query: str) -> str:
     """
     Search the internet for medical information using DuckDuckGo.
@@ -316,5 +318,5 @@ def save_to_vector_db(question: str, answer: str):
         logger.error(f"Failed to save to vector db cache: {e}")
 
 
-# ── Export all tools for the agent ──
-ALL_TOOLS = [search_medical_guidelines]
+if __name__ == "__main__":
+    mcp.run(transport='stdio')
