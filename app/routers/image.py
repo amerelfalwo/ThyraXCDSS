@@ -5,17 +5,25 @@ POST /image/validate  — Local ONNX gatekeeper (Node 3).
 POST /image/predict   — ONNX segmentation + classification pipeline (Node 4).
 
 Architecture Notes:
-  - All ONNX inference is CPU-bound and runs inside run_in_threadpool.
+  - All ONNX inference is CPU-bound and runs inside run_in_threadpool
+    via the centralized ``app.services.inference`` module.
   - Models are cached in memory via @functools.lru_cache (first-load only).
   - No external API calls in the validation pipeline.
   - Results pushed to Patient State Manager if session_id provided.
+
+Threading Pattern:
+  Async route handler (event loop):
+    1. await file.read()                   ← async I/O
+    2. await run_in_threadpool(…)          ← offload CPU to worker thread
+    3. await storage.upload(…)             ← async I/O
+    4. await db.commit()                   ← async I/O
 """
 
 import logging
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
-from fastapi.concurrency import run_in_threadpool
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -24,7 +32,7 @@ from app.core.storage import upload_image_to_storage, get_signed_url
 from app.core.database import get_db
 from app.core.db_models import PatientSession
 from app.schemas.image import ImagePredictionResponse, ImageValidationResponse
-from app.services.image_service import run_gatekeeper
+from app.services.inference import run_ultrasound_inference, run_gatekeeper_inference
 from app.services.vision_explanation import generate_vision_explanation
 
 logger = logging.getLogger(__name__)
@@ -113,11 +121,12 @@ async def validate_ultrasound_image(
             )
             continue
 
+        # ── Step 1: Async I/O — read file bytes without blocking ──
         image_bytes = await file.read()
 
         try:
-            # ONNX inference is CPU-bound — must run in threadpool
-            result = await run_in_threadpool(run_gatekeeper, image_bytes)
+            # ── Step 2: Offload CPU-bound inference to threadpool ──
+            result = await run_in_threadpool(run_gatekeeper_inference, image_bytes)
 
             logger.info(
                 f"Gatekeeper result: is_ultrasound={result['is_ultrasound']} "
@@ -167,7 +176,15 @@ async def predict_ultrasound_image(
     """
     Run the full ONNX segmentation → classification pipeline.
 
-    If `session_id` is provided, the result is pushed to the
+    Threading Architecture:
+      1. ``await file.read()`` — non-blocking file I/O on event loop.
+      2. ``await run_in_threadpool(run_ultrasound_inference, …)`` —
+         offloads ALL CPU-bound ONNX work (U-Net segmentation, ROI
+         extraction, classification) to a worker thread.
+      3. Async I/O (storage upload, DB commit, LLM call) stays on
+         the event loop after the threadpool returns.
+
+    If ``session_id`` is provided, the result is pushed to the
     Patient State Manager for downstream correlation.
 
     Args:
@@ -175,14 +192,13 @@ async def predict_ultrasound_image(
         files:   Uploaded ultrasound images.
         force:   If True, marks the response with a bypass warning.
         session_id: Optional session ID for patient state tracking.
+        doctor_id:  Optional doctor ID for ownership verification.
     """
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded. Please attach at least one image.")
 
     base_url = str(request.base_url)
     results: List[ImagePredictionResponse] = []
-
-    from app.segmentation.model import process_full_pipeline
 
     for file in files:
         if not file.content_type or not file.content_type.startswith("image/"):
@@ -196,11 +212,20 @@ async def predict_ultrasound_image(
             continue
 
         try:
+            # ── Step 1: Async I/O — read file bytes without blocking ──
             image_bytes = await file.read()
-            result = await run_in_threadpool(process_full_pipeline, image_bytes, base_url)
+
+            # ── Step 2: Offload CPU-bound inference to threadpool ──
+            # This calls the pure synchronous function from
+            # app.services.inference which runs U-Net segmentation +
+            # classification entirely on a worker thread.
+            result = await run_in_threadpool(
+                run_ultrasound_inference, image_bytes, base_url
+            )
             result["filename"] = file.filename
 
-            # ── Upload Images to Storage (or fallback to base64) ──
+            # ── Step 3: Async I/O — Upload images to storage ──
+            # (runs on the event loop, non-blocking)
             images_data = result.pop("images", None)
             if images_data and "unique_id" in images_data:
                 uid = images_data["unique_id"]
@@ -245,7 +270,7 @@ async def predict_ultrasound_image(
                     "but results may be unreliable if it is not."
                 )
 
-            # ── LLM explanation of deterministic results ──
+            # ── Step 4: Async I/O — LLM explanation ──
             cls = result.get("classification", {})
             analysis_type = "Ultrasound Segmentation + Classification (ACR TI-RADS)"
             if isinstance(cls, dict):
@@ -271,7 +296,7 @@ async def predict_ultrasound_image(
                 if ai_recommendation:
                     result["ai_recommendation"] = ai_recommendation
 
-            # ── Push to Database (Phase 3) ──
+            # ── Step 5: Async I/O — Push to Database ──
             if session_id and doctor_id:
                 stmt = select(PatientSession).where(
                     PatientSession.session_id == session_id,
@@ -281,8 +306,6 @@ async def predict_ultrasound_image(
                 patient_session = session_result.scalar_one_or_none()
 
                 if patient_session:
-                    # If multiple images are processed, we can store them in a list or just the latest one.
-                    # Here we update with the latest result as a JSON dictionary.
                     patient_session.ultrasound_result = result
                     await db.commit()
                 else:

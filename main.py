@@ -44,10 +44,36 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
+    
+    # ── 1. Initialize LangChain LLM Cache (Redis) ──
+    redis_client = None
     try:
-        pass
+        import os
+        from langchain.globals import set_llm_cache
+        from langchain_community.cache import AsyncRedisCache
+        import redis.asyncio as redis_async
+
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        logger.info(f"Initializing LangChain LLM Cache with Redis at {redis_url}")
+        
+        # Initialize async Redis client to prevent event loop blocking
+        redis_client = redis_async.from_url(redis_url)
+        
+        # Set the global async cache for LangChain
+        set_llm_cache(AsyncRedisCache(redis_client))
+        logger.info("LangChain global AsyncRedisCache configured successfully.")
     except Exception as e:
-        logger.warning(f"Error during initialization: {e}")
+        logger.warning(f"Error initializing LLM Cache: {e}")
+
+    # ── 2. Verify Database Connectivity ──
+    try:
+        from app.core.database import engine
+        from sqlalchemy import text
+        async with engine.begin() as conn:
+            await conn.execute(text("SELECT 1"))
+        logger.info("Database connectivity verified successfully.")
+    except Exception as e:
+        logger.warning(f"Error connecting to database during startup: {e}")
 
     # Ensure required directories exist
     Path("media").mkdir(exist_ok=True)
@@ -57,14 +83,31 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # ── Graceful shutdown: close MCP server connections ──
+    logger.info("Shutdown sequence initiated for ThyraX CDSS.")
+
+    # ── Graceful shutdown: close connections ──
     try:
         from app.agent.mcp_servers.mcp_client import mcp_client_manager
         await mcp_client_manager.shutdown()
+        logger.info("MCP servers shut down.")
     except Exception as e:
         logger.warning(f"Error shutting down MCP servers: {e}")
 
-    logger.info("ThyraX CDSS shutting down.")
+    try:
+        from app.core.database import engine
+        await engine.dispose()
+        logger.info("SQLAlchemy Async Engine disposed safely.")
+    except Exception as e:
+        logger.warning(f"Error disposing SQLAlchemy engine: {e}")
+
+    try:
+        if redis_client:
+            await redis_client.close()
+            logger.info("Redis cache connection closed securely.")
+    except Exception as e:
+        logger.warning(f"Error closing Redis connection: {e}")
+
+    logger.info("ThyraX CDSS shutdown complete.")
 
 
 # ═══════════════════════════════════════════════════════════════

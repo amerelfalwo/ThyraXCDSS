@@ -295,14 +295,34 @@ async def run_agent(
         query, image_base64, image_content_type
     )
 
+    # ── LangSmith Observability: Tags & Metadata ──
+    _langsmith_tags = [
+        "chat_stream",
+        f"mode_{'contextual' if session_id else 'general'}",
+    ]
+    _langsmith_metadata = {
+        k: v for k, v in {
+            "session_id": session_id,
+            "patient_id": patient_id,
+            "source": "run_agent",
+        }.items() if v is not None
+    }
+    _run_config = {
+        "tags": _langsmith_tags,
+        "metadata": _langsmith_metadata,
+    }
+
     _QUOTA_SIGNALS = ("429", "RESOURCE_EXHAUSTED", "rate_limit", "Too Many Requests")
 
     try:
-        result = await executor.ainvoke({
-            "input": enhanced_input,
-            "chat_history": lc_history,
-            "patient_context": patient_context,
-        })
+        result = await executor.ainvoke(
+            {
+                "input": enhanced_input,
+                "chat_history": lc_history,
+                "patient_context": patient_context,
+            },
+            config=_run_config,
+        )
     except Exception as e:
         err_str = str(e)
         # Check if this is a quota/rate limit error
@@ -317,11 +337,14 @@ async def run_agent(
                 
                 # Re-initialize with new key and retry ONCE
                 new_executor = await get_agent_executor(force_refresh=True)
-                result = await new_executor.ainvoke({
-                    "input": enhanced_input,
-                    "chat_history": lc_history,
-                    "patient_context": patient_context,
-                })
+                result = await new_executor.ainvoke(
+                    {
+                        "input": enhanced_input,
+                        "chat_history": lc_history,
+                        "patient_context": patient_context,
+                    },
+                    config={**_run_config, "tags": _langsmith_tags + ["key_rotation_retry"]},
+                )
                 
                 # Process and cache the response
                 final_output = _process_and_cache_response(query or "Patient medical query", result["output"])

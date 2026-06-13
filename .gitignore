@@ -36,3 +36,5 @@ htmlcov/
 
 # Project specifics
 scratch/
+
+sammry/*

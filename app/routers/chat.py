@@ -482,13 +482,13 @@ async def agent_chat_stream(
     if image:
         image_bytes = await image.read()
         
-        from app.segmentation.model import process_full_pipeline
-        from fastapi.concurrency import run_in_threadpool
+        from app.services.inference import run_ultrasound_inference
+        from starlette.concurrency import run_in_threadpool
         
         try:
             base_url = str(request.base_url)
-            # Run the image through the internal CV pipeline
-            cv_result = await run_in_threadpool(process_full_pipeline, image_bytes, base_url)
+            # Run the image through the internal CV pipeline (offloaded to threadpool)
+            cv_result = await run_in_threadpool(run_ultrasound_inference, image_bytes, base_url)
             
             # Extract prediction summary
             cls = cv_result.get("classification", {})

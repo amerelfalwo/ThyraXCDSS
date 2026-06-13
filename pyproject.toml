@@ -45,4 +45,6 @@ dependencies = [
     "redis>=5.0.0",
     "pika>=1.3.0",
     "httpx>=0.28.1",
+    # ── NEW: Production WSGI Process Manager ──
+    "gunicorn>=22.0.0",
 ]
