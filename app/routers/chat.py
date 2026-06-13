@@ -1,11 +1,20 @@
 """
-AI Agent Chat Endpoint (Node 5).
+AI Agent Chat Endpoints (Node 5).
 
-POST /agent/chat
+POST /agent/chat/stream
   Accepts a medical query, optional chat_history, and optional image
   for multi-modal analysis. Uses StreamingResponse for real-time UX.
 
-Supports three input modes:
+POST /agent/chat  (Dual-Mode)
+  Mode 1 — General Medical Chat:
+    Send only ``user_message``.  No session_id needed.
+    Uses a generic medical-assistant persona; no persistence.
+  Mode 2 — Contextual Patient Chat:
+    Supply ``session_id``, ``patient_id``, and ``doctor_id``.
+    Data-isolation is enforced, patient context injected,
+    and conversation persisted to the sessions table.
+
+Supports three input modes (stream endpoint):
   - Text only:   {"query": "What is TSH?"}
   - Image only:  {"image_base64": "...", "image_content_type": "image/png"}
   - Multimodal:  {"query": "Interpret this lab report", "image_base64": "..."}
@@ -38,10 +47,13 @@ from app.agent.agent import run_agent
 
 logger = logging.getLogger(__name__)
 
+from app.core.responses import UnicodeJSONResponse
+
 router = APIRouter(
     prefix="/agent",
     tags=["AI Agent"],
     dependencies=[Depends(verify_internal_api_key)],
+    default_response_class=UnicodeJSONResponse,
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -216,15 +228,14 @@ async def _stream_agent_response(
     chat_history: List[dict],
     image_base64: Optional[str],
     image_content_type: Optional[str],
-    session_id: Optional[str]
+    session_id: Optional[str],
+    patient_id: Optional[int] = None
 ):
     """
     Generator that runs the agent and yields the response as SSE.
 
-    After the stream completes successfully, the full user message and
-    accumulated assistant response are persisted to the ``sessions``
-    table's ``conversation_history`` JSONB column via a fresh
-    ``AsyncSession``.
+    If session_id is None, runs in General Medical Chat mode using ChatGroq directly.
+    Otherwise, runs in Contextual Patient Chat mode via run_agent.
     """
     from app.core.circuit_breaker import is_circuit_open, record_success, record_failure
     from app.core.audit import log_audit_event
@@ -232,7 +243,67 @@ async def _stream_agent_response(
 
     effective_query = _get_effective_query(query, bool(image_base64))
 
-    # ── Circuit breaker check ──
+    # ── General Medical Chat Mode (Mode 1) ──
+    if session_id is None:
+        from langchain_groq import ChatGroq
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from app.core.config import settings
+        from app.agent.agent import _convert_chat_history
+        
+        keys = settings.get_groq_keys()
+        if not keys:
+            error_payload = json.dumps({"status": "error", "response": "No API keys configured.", "tools_used": []})
+            yield f"data: {error_payload}\n\n"
+            return
+            
+        llm = ChatGroq(
+            model=settings.GROQ_MODEL,
+            api_key=keys[0],
+            temperature=settings.LLM_TEMPERATURE,
+        )
+        
+        yield f"data: {json.dumps({'status': 'thinking', 'message': 'Processing your query...'}, ensure_ascii=False)}\n\n"
+        
+        if image_base64:
+            effective_query = f"{effective_query}\n\n[Note: An image was provided with this query. Please focus on the text query.]"
+            
+        messages = [SystemMessage(content=_GENERAL_MEDICAL_PERSONA)]
+        messages.extend(_convert_chat_history(chat_history))
+        messages.append(HumanMessage(content=effective_query))
+        
+        try:
+            full_response = ""
+            async for chunk in llm.astream(messages):
+                if chunk.content:
+                    full_response += chunk.content
+                    payload = json.dumps({
+                        "status": "streaming",
+                        "chunk": chunk.content
+                    }, ensure_ascii=False)
+                    yield f"data: {payload}\n\n"
+            
+            final_payload = json.dumps({
+                "status": "success",
+                "query": query,
+                "response": full_response,
+                "tools_used": [],
+            }, ensure_ascii=False)
+            yield f"data: {final_payload}\n\n"
+            
+            log_audit_event(
+                node="agent_chat",
+                action="general_chat_invocation",
+                result=full_response[:200],
+                metadata={"query": effective_query[:200], "mode": "general"}
+            )
+            return
+        except Exception as e:
+            logger.error(f"General chat error: {e}")
+            error_payload = json.dumps({"status": "error", "response": "The AI model is currently unavailable.", "tools_used": []})
+            yield f"data: {error_payload}\n\n"
+            return
+
+    # ── Contextual Patient Chat Mode (Mode 2) ──
     if is_circuit_open("agent_chat"):
         error_payload = json.dumps({
             "status": "circuit_open",
@@ -241,7 +312,7 @@ async def _stream_agent_response(
                 "The system will automatically retry in ~2 minutes."
             ),
             "tools_used": [],
-        })
+        }, ensure_ascii=False)
         yield f"data: {error_payload}\n\n"
         return
 
@@ -250,7 +321,7 @@ async def _stream_agent_response(
     last_error = None
 
     # Send initial "thinking" event
-    yield f"data: {json.dumps({'status': 'thinking', 'message': 'Processing your query...'})}\n\n"
+    yield f"data: {json.dumps({'status': 'thinking', 'message': 'Processing your query...'}, ensure_ascii=False)}\n\n"
 
     for attempt in range(MAX_RETRIES):
         try:
@@ -260,6 +331,7 @@ async def _stream_agent_response(
                 image_base64=image_base64,
                 image_content_type=image_content_type,
                 session_id=session_id,
+                patient_id=str(patient_id) if patient_id else None,
             )
 
             output_text = result["output"]
@@ -295,7 +367,7 @@ async def _stream_agent_response(
                 "query": query,
                 "response": output_text,
                 "tools_used": result["tools_used"],
-            })
+            }, ensure_ascii=False)
             yield f"data: {payload}\n\n"
 
             # ── Persist conversation to sessions table ──
@@ -328,7 +400,7 @@ async def _stream_agent_response(
                     f"Gemini transient error (attempt {attempt + 1}/{MAX_RETRIES}), "
                     f"retrying in {delay}s: {error_str[:120]}"
                 )
-                yield f"data: {json.dumps({'status': 'retrying', 'attempt': attempt + 2})}\n\n"
+                yield f"data: {json.dumps({'status': 'retrying', 'attempt': attempt + 2}, ensure_ascii=False)}\n\n"
                 await asyncio.sleep(delay)
                 continue
 
@@ -345,7 +417,7 @@ async def _stream_agent_response(
             "Please try again in a moment."
         ),
         "tools_used": [],
-    })
+    }, ensure_ascii=False)
     yield f"data: {error_payload}\n\n"
 
 
@@ -357,13 +429,46 @@ async def _stream_agent_response(
 async def agent_chat_stream(
     query: Optional[str] = Form(None),
     session_id: Optional[str] = Form(None),
+    patient_id: Optional[int] = Form(None),
+    doctor_id: Optional[int] = Form(None),
     chat_history: str = Form("[]"),
     image: Optional[UploadFile] = File(None),
+    db: AsyncSession = Depends(get_db),
 ):
     """
-    Chat with ThyraX via Server-Sent Events (streaming).
+    Dual-Mode Chatbot Endpoint (streaming).
     Now supports multipart/form-data for direct file uploads.
+    Mode 1: General Medical Chat (session_id is None).
+    Mode 2: Contextual Patient Chat (session_id provided, requires DB isolation check).
     """
+    # ── Mode 2 DB Isolation Check ──
+    if session_id is not None:
+        if doctor_id is None:
+            raise HTTPException(status_code=422, detail="doctor_id is required when session_id is provided.")
+        
+        from app.schemas.memory_models import Session as SessionModel, Patient
+        from sqlalchemy import select
+        
+        doctor_id_str = str(doctor_id)
+        session_result = await db.execute(
+            select(SessionModel).where(
+                SessionModel.session_id == session_id,
+                SessionModel.doctor_id == doctor_id_str,
+            )
+        )
+        if not session_result.scalar_one_or_none():
+            raise HTTPException(status_code=403, detail="Forbidden: Session does not belong to the provided Doctor.")
+            
+        if patient_id is not None:
+            patient_result = await db.execute(
+                select(Patient).where(
+                    Patient.patient_id == str(patient_id),
+                    Patient.doctor_id == doctor_id_str,
+                )
+            )
+            if not patient_result.scalar_one_or_none():
+                raise HTTPException(status_code=403, detail="Forbidden: Patient does not belong to the provided Doctor.")
+
     # Parse chat_history
     try:
         history_list = json.loads(chat_history)
@@ -387,98 +492,192 @@ async def agent_chat_stream(
                 "query": query,
                 "response": _get_rejection_message(query),
                 "tools_used": [],
-            })
+            }, ensure_ascii=False)
             yield f"data: {payload}\n\n"
         return StreamingResponse(_reject(), media_type="text/event-stream")
 
     return StreamingResponse(
-        _stream_agent_response(query, history_list, image_base64, image_content_type, session_id),
+        _stream_agent_response(query, history_list, image_base64, image_content_type, session_id, patient_id),
         media_type="text/event-stream",
     )
+
+
+_GENERAL_MEDICAL_PERSONA = (
+    "You are ThyraX, a general-purpose medical AI assistant. "
+    "You help doctors by answering evidence-based medical questions across "
+    "all specialties.  Reply in the same language the doctor uses. "
+    "If the question is outside the medical domain, politely decline.\n\n"
+    "IMPORTANT:\n"
+    "- Always cite clinical guidelines or standard references when possible.\n"
+    "- Do NOT fabricate studies.  If unsure, say so.\n"
+    "- Address the user as 'Doctor'."
+)
 
 
 @router.post("/chat")
 async def agent_chat(
     request: AgentChatRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """
-    Refactored chat endpoint for Phase 4.
-    Accepts JSON payload with patient_id, session_id, doctor_id, and user_message.
-    Validates data isolation, fetches memory context, and streams Groq LLM response.
+    **Dual-Mode** chat endpoint (streaming SSE).
+
+    **Mode 1 — General Medical Chat** (``session_id`` is ``None``):
+      • Skips all database validation.
+      • Uses a generic medical-assistant system prompt.
+      • Streams the response; does **not** persist anything.
+
+    **Mode 2 — Contextual Patient Chat** (``session_id`` provided):
+      • Validates data-isolation (doctor owns session).
+      • Injects full patient context (long-term + short-term memory).
+      • Persists the exchange to the ``sessions`` table after streaming.
     """
-    from app.schemas.memory_models import Session as SessionModel, Patient
-    from app.services.memory_manager import memory_manager
     from langchain_groq import ChatGroq
     from langchain_core.messages import SystemMessage, HumanMessage
 
-    patient_id_str = str(request.patient_id)
+    # ── LLM bootstrap (shared by both modes) ──
+    keys = settings.get_groq_keys()
+    if not keys:
+        raise HTTPException(
+            status_code=500,
+            detail="No GROQ_API_KEYs found in configuration.",
+        )
+
+    llm = ChatGroq(
+        model=settings.GROQ_MODEL,
+        api_key=keys[0],
+        temperature=settings.LLM_TEMPERATURE,
+    )
+
+    # ═══════════════════════════════════════════════════════════
+    # MODE 1 — General Medical Chat  (no session)
+    # ═══════════════════════════════════════════════════════════
+    if request.session_id is None:
+        messages = [
+            SystemMessage(content=_GENERAL_MEDICAL_PERSONA),
+            HumanMessage(content=request.user_message),
+        ]
+
+        async def _general_stream():
+            agent_response = ""
+            try:
+                async for chunk in llm.astream(messages):
+                    if chunk.content:
+                        agent_response += chunk.content
+                        yield f"data: {json.dumps({'status': 'streaming', 'chunk': chunk.content}, ensure_ascii=False)}\n\n"
+
+                # Audit (no persistence)
+                from app.core.audit import log_audit_event
+                log_audit_event(
+                    node="agent_chat_general",
+                    action="general_medical_query",
+                    result=agent_response[:200],
+                    metadata={
+                        "query": request.user_message[:200],
+                        "mode": "general",
+                    },
+                )
+
+                yield f"data: {json.dumps({'status': 'success', 'response': agent_response}, ensure_ascii=False)}\n\n"
+            except Exception as e:
+                logger.error(f"General-mode streaming error: {e}")
+                yield f"data: {json.dumps({'status': 'error', 'detail': str(e)}, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            _general_stream(), media_type="text/event-stream"
+        )
+
+    # ═══════════════════════════════════════════════════════════
+    # MODE 2 — Contextual Patient Chat  (session present)
+    # ═══════════════════════════════════════════════════════════
+    from app.schemas.memory_models import Session as SessionModel, Patient
+    from app.services.memory_manager import memory_manager
+
+    # doctor_id is mandatory for contextual mode
+    if request.doctor_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="doctor_id is required when session_id is provided.",
+        )
+
     doctor_id_str = str(request.doctor_id)
 
-    # 1. Validate data isolation
-    patient_result = await db.execute(
-        select(Patient).where(Patient.patient_id == patient_id_str, Patient.doctor_id == doctor_id_str)
-    )
-    patient = patient_result.scalar_one_or_none()
-
+    # ── Data-Isolation Guard ──
     session_result = await db.execute(
-        select(SessionModel).where(SessionModel.session_id == request.session_id, SessionModel.doctor_id == doctor_id_str)
+        select(SessionModel).where(
+            SessionModel.session_id == request.session_id,
+            SessionModel.doctor_id == doctor_id_str,
+        )
     )
     session = session_result.scalar_one_or_none()
 
-    if not patient or not session:
+    if not session:
         raise HTTPException(
-            status_code=403, 
-            detail="Forbidden: Patient or Session does not belong to the provided Doctor."
+            status_code=403,
+            detail="Forbidden: Session does not belong to the provided Doctor.",
         )
 
-    # 2. Fetch context
-    system_prompt = await memory_manager.get_injected_context(request.patient_id, request.session_id, db)
+    if request.patient_id is not None:
+        patient_id_str = str(request.patient_id)
+        patient_result = await db.execute(
+            select(Patient).where(
+                Patient.patient_id == patient_id_str,
+                Patient.doctor_id == doctor_id_str,
+            )
+        )
+        if not patient_result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Patient does not belong to the provided Doctor.",
+            )
 
-    # 3. Call Groq LLM
-    keys = settings.get_groq_keys()
-    if not keys:
-        raise HTTPException(status_code=500, detail="No GROQ_API_KEYs found in configuration.")
-    
-    llm = ChatGroq(model=settings.GROQ_MODEL, api_key=keys[0], temperature=settings.LLM_TEMPERATURE)
-    
+    # ── Fetch patient context (memory injection) ──
+    system_prompt = await memory_manager.get_injected_context(
+        patient_id=request.patient_id or 0,
+        session_id=request.session_id,
+        db=db,
+    )
+
     messages = [
         SystemMessage(content=system_prompt),
-        HumanMessage(content=request.user_message)
+        HumanMessage(content=request.user_message),
     ]
-    
-    async def generate_response():
+
+    async def _contextual_stream():
         agent_response = ""
         try:
             async for chunk in llm.astream(messages):
                 if chunk.content:
                     agent_response += chunk.content
-                    yield f"data: {json.dumps({'status': 'streaming', 'chunk': chunk.content})}\n\n"
-            
-            # Post-processing: Persist via fresh session (safe for generators)
+                    yield f"data: {json.dumps({'status': 'streaming', 'chunk': chunk.content}, ensure_ascii=False)}\n\n"
+
+            # ── Persist conversation ──
             await _persist_conversation(
                 session_id=request.session_id,
                 user_message=request.user_message,
                 assistant_response=agent_response,
             )
-            
-            # Also log audit event
+
+            # ── Audit log ──
             from app.core.audit import log_audit_event
             log_audit_event(
-                node="agent_chat_phase4",
+                node="agent_chat_contextual",
                 action="agent_invocation",
                 result=agent_response[:200],
                 metadata={
                     "query": request.user_message[:200],
                     "patient_id": request.patient_id,
                     "session_id": request.session_id,
-                    "doctor_id": request.doctor_id
+                    "doctor_id": request.doctor_id,
+                    "mode": "contextual",
                 },
             )
-            
-            yield f"data: {json.dumps({'status': 'success', 'response': agent_response})}\n\n"
-        except Exception as e:
-            logger.error(f"Error during streaming: {e}")
-            yield f"data: {json.dumps({'status': 'error', 'detail': str(e)})}\n\n"
 
-    return StreamingResponse(generate_response(), media_type="text/event-stream")
+            yield f"data: {json.dumps({'status': 'success', 'response': agent_response}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.error(f"Contextual-mode streaming error: {e}")
+            yield f"data: {json.dumps({'status': 'error', 'detail': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _contextual_stream(), media_type="text/event-stream"
+    )

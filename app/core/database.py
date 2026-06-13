@@ -15,6 +15,7 @@ if "supabase" in settings.ASYNC_DATABASE_URL.lower():
     # if using transaction pooler. We'll disable statement cache if using the pooler port.
     if ":6543" in settings.ASYNC_DATABASE_URL:
         connect_args["statement_cache_size"] = 0
+        connect_args["prepared_statement_cache_size"] = 0
 
 engine = create_async_engine(
     settings.ASYNC_DATABASE_URL,

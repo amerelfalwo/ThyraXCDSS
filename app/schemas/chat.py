@@ -73,10 +73,21 @@ class ChatRequest(BaseModel):
 
 
 class AgentChatRequest(BaseModel):
-    """JSON payload for Phase 3 refactored agent chat."""
-    patient_id: int
-    session_id: str
-    doctor_id: int
+    """JSON payload for the Dual-Mode agent chat.
+
+    Mode 1 — General Medical Chat:
+        Send only ``user_message``.  ``session_id``, ``patient_id``, and
+        ``doctor_id`` may all be ``None``.  The agent uses a generic
+        medical-assistant persona and does **not** persist the exchange.
+
+    Mode 2 — Contextual Patient Chat:
+        Provide ``session_id``, ``patient_id``, and ``doctor_id``.
+        The endpoint validates data-isolation, injects patient context,
+        and persists the conversation.
+    """
+    patient_id: Optional[int] = None
+    session_id: Optional[str] = None
+    doctor_id: Optional[int] = None
     user_message: str
 
 

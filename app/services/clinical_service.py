@@ -130,25 +130,44 @@ async def route_clinical_decision(
     """
     # ── Rule-based routing ──
     if functional_status == "hyperthyroid":
-        base_recommendation = (
-            "Patient shows signs of HYPERTHYROIDISM. "
-            "The recommended next step is a Radionuclide (Iodine-123) Scan "
-            "to evaluate for autonomously functioning thyroid nodules (Hot Nodules). "
-            "Hot nodules are RARELY malignant (<1% risk). "
-            "Cancer workup is NOT immediately indicated unless cold nodules are "
-            "identified on the scan."
-        )
-        result = {
-            "risk_level": "moderate",
-            "recommendation": base_recommendation,
-            "next_step": "radionuclide_scan",
-            "next_step_details": {
-                "action": "Order Radionuclide Scan (I-123 uptake)",
-                "rationale": "Differentiate hot vs. cold nodules in hyperthyroid state",
-                "cancer_pipeline_triggered": False,
-                "urgency": "routine",
-            },
-        }
+        if nodule_present:
+            base_recommendation = (
+                "Patient shows signs of HYPERTHYROIDISM with a PALPABLE NODULE. "
+                "The recommended next step is a Radionuclide (Iodine-123) Scan "
+                "to evaluate for an autonomously functioning thyroid nodule (Hot Nodule). "
+                "Hot nodules are RARELY malignant (<1% risk). "
+                "Cancer workup is NOT immediately indicated unless cold nodules are "
+                "identified on the scan."
+            )
+            result = {
+                "risk_level": "moderate",
+                "recommendation": base_recommendation,
+                "next_step": "radionuclide_scan",
+                "next_step_details": {
+                    "action": "Order Radionuclide Scan (I-123 uptake)",
+                    "rationale": "Differentiate hot vs. cold nodules in hyperthyroid state",
+                    "cancer_pipeline_triggered": False,
+                    "urgency": "routine",
+                },
+            }
+        else:
+            base_recommendation = (
+                "Patient shows signs of HYPERTHYROIDISM with NO palpable nodule. "
+                "The recommended next step is to evaluate etiology (e.g., Graves' disease "
+                "or thyroiditis) via TSH Receptor Antibodies (TRAb) or a generic uptake scan. "
+                "Since no structural nodules are present, cancer workup is NOT indicated."
+            )
+            result = {
+                "risk_level": "low",
+                "recommendation": base_recommendation,
+                "next_step": "biochemical_workup",
+                "next_step_details": {
+                    "action": "Order TRAb / evaluate etiology",
+                    "rationale": "Hyperthyroidism without discrete nodules suggests autoimmune or systemic etiology",
+                    "cancer_pipeline_triggered": False,
+                    "urgency": "routine",
+                },
+            }
 
     elif functional_status in ("hypothyroid", "normal") and nodule_present:
         risk = "high" if functional_status == "hypothyroid" else "elevated"

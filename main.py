@@ -71,6 +71,8 @@ async def lifespan(app: FastAPI):
 # App
 # ═══════════════════════════════════════════════════════════════
 
+from app.core.responses import UnicodeJSONResponse
+
 app = FastAPI(
     title="ThyraX CDSS API",
     description=(
@@ -90,6 +92,7 @@ app = FastAPI(
     ),
     version="4.0.0",
     lifespan=lifespan,
+    default_response_class=UnicodeJSONResponse,
 )
 
 app.add_middleware(

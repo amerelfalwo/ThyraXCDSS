@@ -29,10 +29,13 @@ from app.services.vision_explanation import generate_vision_explanation
 
 logger = logging.getLogger(__name__)
 
+from app.core.responses import UnicodeJSONResponse
+
 router = APIRouter(
     prefix="/image",
     tags=["Image Pipeline"],
     dependencies=[Depends(verify_internal_api_key)],
+    default_response_class=UnicodeJSONResponse,
 )
 
 MULTI_IMAGE_REQUEST_BODY = {

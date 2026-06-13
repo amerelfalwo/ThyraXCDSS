@@ -7,6 +7,10 @@ class ClinicalAssessmentRequest(BaseModel):
         default=None,
         description="Session ID to link results to the patient's diagnostic journey.",
     )
+    doctor_id: Optional[str] = Field(
+        default=None,
+        description="Doctor ID for isolation check",
+    )
     age: int = Field(..., ge=0, le=120, description="Patient age in years")
     on_thyroxine: int = Field(..., ge=0, le=1, description="Is patient on thyroxine? 1=yes, 0=no")
     thyroid_surgery: int = Field(..., ge=0, le=1, description="History of thyroid surgery? 1=yes, 0=no")

@@ -18,17 +18,24 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.concurrency import run_in_threadpool
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
+from app.core.database import get_db
 from app.core.security import verify_internal_api_key
 from app.schemas.fnac import FnacPredictionResponse
 from app.services.vision_explanation import generate_vision_explanation
+from app.schemas.memory_models import Session as SessionModel, Patient
 
 logger = logging.getLogger(__name__)
+
+from app.core.responses import UnicodeJSONResponse
 
 router = APIRouter(
     prefix="/fnac",
     tags=["FNAC Cytopathology"],
     dependencies=[Depends(verify_internal_api_key)],
+    default_response_class=UnicodeJSONResponse,
 )
 
 MULTI_IMAGE_REQUEST_BODY = {
@@ -214,6 +221,9 @@ def _run_fnac_classification(image_bytes: bytes) -> dict:
 async def predict_fnac(
     files: List[UploadFile] = File(..., description="Upload multiple images"),
     session_id: str = Form(default=None),
+    doctor_id: str = Form(default=None),
+    patient_id: str = Form(default=None),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Classify an FNAC cytopathology image using The Bethesda System.
@@ -225,6 +235,31 @@ async def predict_fnac(
     If `session_id` is provided, the result is pushed to the
     Patient State Manager for correlation with other diagnostic nodes.
     """
+    # ── Mode 2 DB Isolation Check ──
+    if session_id is not None:
+        if doctor_id is None:
+            raise HTTPException(status_code=422, detail="doctor_id is required when session_id is provided.")
+        
+        doctor_id_str = str(doctor_id)
+        session_result = await db.execute(
+            select(SessionModel).where(
+                SessionModel.session_id == session_id,
+                SessionModel.doctor_id == doctor_id_str,
+            )
+        )
+        if not session_result.scalar_one_or_none():
+            raise HTTPException(status_code=403, detail="Forbidden: Session does not belong to the provided Doctor.")
+            
+        if patient_id is not None:
+            patient_result = await db.execute(
+                select(Patient).where(
+                    Patient.patient_id == str(patient_id),
+                    Patient.doctor_id == doctor_id_str,
+                )
+            )
+            if not patient_result.scalar_one_or_none():
+                raise HTTPException(status_code=403, detail="Forbidden: Patient does not belong to the provided Doctor.")
+
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded. Please attach at least one image.")
 

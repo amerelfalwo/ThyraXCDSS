@@ -426,15 +426,11 @@ async def phase3_agent() -> bool:
 
     try:
         # ── 3a. Build request payload ──
-        # The AgentChatRequest expects: patient_id (int), doctor_id (int),
-        # session_id (str), user_message (str).
-        # However, our test IDs are strings. The endpoint schema uses int
-        # for patient_id/doctor_id, but the DB stores them as strings.
-        # We'll need to handle this carefully.
-        #
-        # NOTE: Since the schema defines patient_id: int and doctor_id: int,
-        # but our DB PKs are strings, we'll test the /agent/chat/stream
-        # endpoint instead, which accepts Form data as strings.
+        # The AgentChatRequest now supports dual-mode:
+        # patient_id (Optional[int]), doctor_id (Optional[int]),
+        # session_id (Optional[str]), user_message (str).
+        # Our test IDs are strings, so we use the /agent/chat/stream
+        # endpoint which accepts Form data as strings.
 
         _info(f"Sending medical query to {BASE_URL}/agent/chat/stream ...")
 

@@ -7,20 +7,52 @@ POST /clinical/assess
 """
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
+from app.core.database import get_db
 from app.core.security import verify_internal_api_key
 from app.schemas.clinical import ClinicalAssessmentRequest, ClinicalAssessmentResponse
 from app.services.clinical_service import run_clinical_assessment
+from app.schemas.memory_models import Session as SessionModel, Patient
+
+from app.core.responses import UnicodeJSONResponse
 
 router = APIRouter(
     prefix="/clinical",
     tags=["Clinical Assessment"],
     dependencies=[Depends(verify_internal_api_key)],
+    default_response_class=UnicodeJSONResponse,
 )
 
 
 @router.post("/assess", response_model=ClinicalAssessmentResponse)
-async def assess_clinical(req: ClinicalAssessmentRequest):
+async def assess_clinical(req: ClinicalAssessmentRequest, db: AsyncSession = Depends(get_db)):
+    # ── Mode 2 DB Isolation Check ──
+    if req.session_id is not None:
+        if req.doctor_id is None:
+            raise HTTPException(status_code=422, detail="doctor_id is required when session_id is provided.")
+        
+        doctor_id_str = str(req.doctor_id)
+        session_result = await db.execute(
+            select(SessionModel).where(
+                SessionModel.session_id == req.session_id,
+                SessionModel.doctor_id == doctor_id_str,
+            )
+        )
+        if not session_result.scalar_one_or_none():
+            raise HTTPException(status_code=403, detail="Forbidden: Session does not belong to the provided Doctor.")
+            
+        if req.patient_id is not None:
+            patient_result = await db.execute(
+                select(Patient).where(
+                    Patient.patient_id == str(req.patient_id),
+                    Patient.doctor_id == doctor_id_str,
+                )
+            )
+            if not patient_result.scalar_one_or_none():
+                raise HTTPException(status_code=403, detail="Forbidden: Patient does not belong to the provided Doctor.")
+
     """
     Run the full CDSS clinical workflow.
 
