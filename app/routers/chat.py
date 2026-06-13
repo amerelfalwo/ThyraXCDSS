@@ -33,7 +33,7 @@ import logging
 import base64
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -427,6 +427,7 @@ async def _stream_agent_response(
 
 @router.post("/chat/stream")
 async def agent_chat_stream(
+    request: Request,
     query: Optional[str] = Form(None),
     session_id: Optional[str] = Form(None),
     patient_id: Optional[int] = Form(None),
@@ -475,13 +476,45 @@ async def agent_chat_stream(
     except Exception:
         history_list = []
 
-    # Process image
+    # ── Pipeline Interceptor for Images ──
     image_base64 = None
     image_content_type = None
     if image:
         image_bytes = await image.read()
-        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-        image_content_type = image.content_type
+        
+        from app.segmentation.model import process_full_pipeline
+        from fastapi.concurrency import run_in_threadpool
+        
+        try:
+            base_url = str(request.base_url)
+            # Run the image through the internal CV pipeline
+            cv_result = await run_in_threadpool(process_full_pipeline, image_bytes, base_url)
+            
+            # Extract prediction summary
+            cls = cv_result.get("classification", {})
+            if isinstance(cls, dict):
+                cv_summary = (
+                    f"Label: {cls.get('label')}, "
+                    f"Risk Level: {cls.get('risk_level')}, "
+                    f"ACR TI-RADS: {cls.get('acr_tirads_level')}, "
+                    f"Confidence: {cls.get('confidence_pct', 0):.2f}%"
+                )
+            else:
+                cv_summary = str(cls) if cls else "No detection or empty mask."
+                
+            # Inject the CV results into the user's text query
+            injection_text = f"\n\n[Internal CV Model Image Analysis Result: {cv_summary}]"
+            query = (query or "") + injection_text
+            
+            logger.info("Intercepted image upload, injected CV results, and converted to Text-Only LLM request.")
+            
+        except Exception as e:
+            logger.error(f"CV Pipeline failed for intercepted image: {e}")
+            query = (query or "") + "\n\n[System Note: An image was uploaded but the internal CV model failed to process it.]"
+            
+        # Explicitly set multimodal inputs to None to save LLM tokens
+        image_base64 = None
+        image_content_type = None
 
     # Only run guardrail on text queries
     if query and not _is_medical_query(query):
