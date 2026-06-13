@@ -48,4 +48,4 @@ echo "============================================="
 
 # exec replaces the shell process with gunicorn, ensuring
 # proper signal forwarding (SIGTERM, SIGINT) for graceful shutdown.
-exec gunicorn main:app -c gunicorn.conf.py
+exec uv run gunicorn main:app -c gunicorn.conf.py
