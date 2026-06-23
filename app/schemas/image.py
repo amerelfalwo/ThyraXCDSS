@@ -86,6 +86,10 @@ class ClassificationResult(BaseModel):
         ...,
         description="Evidence-based follow-up recommendation per ACR TI-RADS guidelines.",
     )
+    next_step: str = Field(
+        ...,
+        description="Actionable next step based on the clinical recommendation.",
+    )
     needs_manual_review: bool = Field(
         False,
         description="True if classification confidence < 65% — physician must verify.",

@@ -77,6 +77,7 @@ def assess_risk_level(class_idx: int, confidence: float) -> dict:
                     "No Fine Needle Aspiration (FNA) is recommended based on imaging alone. "
                     "Follow-up ultrasound in 12–24 months if clinically indicated."
                 ),
+                "next_step": "Routine follow-up ultrasound in 12-24 months.",
             }
         elif confidence >= 0.70:
             return {
@@ -87,6 +88,7 @@ def assess_risk_level(class_idx: int, confidence: float) -> dict:
                     "Consider follow-up ultrasound in 12 months. "
                     "FNA may be considered if nodule is ≥ 2.5 cm per ACR TI-RADS guidelines."
                 ),
+                "next_step": "Consider FNA if nodule ≥ 2.5 cm; otherwise, follow-up ultrasound in 12 months.",
             }
         else:
             return {
@@ -97,6 +99,7 @@ def assess_risk_level(class_idx: int, confidence: float) -> dict:
                     "Clinical and sonographic correlation is required. "
                     "Consider FNA if nodule is ≥ 2.5 cm, or follow-up ultrasound in 6–12 months."
                 ),
+                "next_step": "Clinical correlation required. Consider FNA if nodule ≥ 2.5 cm, else 6-12 month follow-up.",
             }
     else:
         # ── Suspicious predictions ──
@@ -110,6 +113,7 @@ def assess_risk_level(class_idx: int, confidence: float) -> dict:
                     "for nodules ≥ 1.0 cm per ACR TI-RADS TR5 guidelines. "
                     "Refer to endocrinology/thyroid surgery for evaluation."
                 ),
+                "next_step": "Immediate referral for FNA biopsy (if nodule ≥ 1.0 cm) and endocrinology evaluation.",
             }
         elif confidence >= 0.70:
             return {
@@ -121,6 +125,7 @@ def assess_risk_level(class_idx: int, confidence: float) -> dict:
                     "If nodule is < 1.0 cm, consider follow-up ultrasound in 6 months. "
                     "Clinical correlation with patient history is advised."
                 ),
+                "next_step": "Perform FNA if nodule ≥ 1.0 cm; otherwise, follow-up ultrasound in 6 months.",
             }
         else:
             return {
@@ -132,6 +137,7 @@ def assess_risk_level(class_idx: int, confidence: float) -> dict:
                     "Follow-up ultrasound in 6–12 months is recommended. "
                     "Clinical and sonographic correlation is required."
                 ),
+                "next_step": "Perform FNA if nodule ≥ 1.5 cm; otherwise, follow-up ultrasound in 6-12 months.",
             }
 
 
@@ -284,6 +290,7 @@ def process_full_pipeline(
             "risk_level": risk["risk_level"],
             "acr_tirads_level": risk["acr_tirads_level"],
             "clinical_recommendation": risk["clinical_recommendation"],
+            "next_step": risk["next_step"],
             "needs_manual_review": needs_review,
         },
         "segmentation": {
