@@ -7,6 +7,7 @@ POST /clinical/assess
 """
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import verify_internal_api_key
 from app.schemas.clinical import ClinicalAssessmentRequest, ClinicalAssessmentResponse
