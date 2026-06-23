@@ -229,7 +229,8 @@ async def _stream_agent_response(
     image_base64: Optional[str],
     image_content_type: Optional[str],
     session_id: Optional[str],
-    patient_id: Optional[int] = None
+    patient_id: Optional[str] = None,
+    doctor_id: Optional[str] = None
 ):
     """
     Generator that runs the agent and yields the response as SSE.
@@ -332,6 +333,7 @@ async def _stream_agent_response(
                 image_content_type=image_content_type,
                 session_id=session_id,
                 patient_id=str(patient_id) if patient_id else None,
+                doctor_id=doctor_id,
             )
 
             output_text = result["output"]
@@ -430,8 +432,8 @@ async def agent_chat_stream(
     request: Request,
     query: Optional[str] = Form(None),
     session_id: Optional[str] = Form(None),
-    patient_id: Optional[int] = Form(None),
-    doctor_id: Optional[int] = Form(None),
+    patient_id: Optional[str] = Form(None),
+    doctor_id: Optional[str] = Form(None),
     chat_history: str = Form("[]"),
     image: Optional[UploadFile] = File(None),
     db: AsyncSession = Depends(get_db),
@@ -443,38 +445,50 @@ async def agent_chat_stream(
     Mode 2: Contextual Patient Chat (session_id provided, requires DB isolation check).
     """
     # ── Mode 2 DB Isolation Check ──
-    if session_id is not None:
-        if doctor_id is None:
-            raise HTTPException(status_code=422, detail="doctor_id is required when session_id is provided.")
-        
-        from app.schemas.memory_models import Session as SessionModel, Patient
-        from sqlalchemy import select
-        
-        doctor_id_str = str(doctor_id)
-        session_result = await db.execute(
-            select(SessionModel).where(
-                SessionModel.session_id == session_id,
-                SessionModel.doctor_id == doctor_id_str,
-            )
-        )
-        if not session_result.scalar_one_or_none():
-            raise HTTPException(status_code=403, detail="Forbidden: Session does not belong to the provided Doctor.")
-            
-        if patient_id is not None:
-            patient_result = await db.execute(
-                select(Patient).where(
-                    Patient.patient_id == str(patient_id),
-                    Patient.doctor_id == doctor_id_str,
-                )
-            )
-            if not patient_result.scalar_one_or_none():
-                raise HTTPException(status_code=403, detail="Forbidden: Patient does not belong to the provided Doctor.")
+    from app.core.security import verify_doctor_session_ownership
+    await verify_doctor_session_ownership(
+        session_id=session_id,
+        doctor_id=doctor_id,
+        patient_id=patient_id,
+        db=db
+    )
 
     # Parse chat_history
     try:
         history_list = json.loads(chat_history)
     except Exception:
         history_list = []
+
+    # ── Inject Diagnostic Context ──
+    if session_id:
+        try:
+            from app.schemas.memory_models import Session as SessionModel
+            from sqlalchemy import select
+            import json
+            
+            session_result = await db.execute(select(SessionModel).where(SessionModel.session_id == session_id))
+            session_obj = session_result.scalar_one_or_none()
+            if session_obj and session_obj.diagnostic_context:
+                diag = session_obj.diagnostic_context
+                diag_parts = []
+                if "ultrasound" in diag:
+                    u_data = diag["ultrasound"]
+                    tirads = u_data.get("acr_tirads_level", "Unknown")
+                    label = u_data.get("label", "Unknown")
+                    conf = u_data.get("confidence_pct", 0.0)
+                    diag_parts.append(f"    - Ultrasound: {tirads} ({label}, {conf:.1f}% confidence)")
+                if "fnac" in diag:
+                    f_data = diag["fnac"]
+                    bethesda = f_data.get("bethesda_category", "Unknown")
+                    label = f_data.get("label", "Unknown")
+                    conf = f_data.get("confidence_pct", 0.0)
+                    diag_parts.append(f"    - FNAC: {bethesda} ({label}, {conf:.1f}% confidence)")
+                if diag_parts:
+                    diagnostic_context_str = "Current Patient Diagnostic Context:\n" + "\n".join(diag_parts)
+                    query = f"[{diagnostic_context_str}]\n\n{query or ''}"
+                    logger.info("Injected diagnostic_context into query.")
+        except Exception as e:
+            logger.error(f"Failed to fetch diagnostic_context: {e}")
 
     # ── Pipeline Interceptor for Images ──
     image_base64 = None
@@ -530,7 +544,7 @@ async def agent_chat_stream(
         return StreamingResponse(_reject(), media_type="text/event-stream")
 
     return StreamingResponse(
-        _stream_agent_response(query, history_list, image_base64, image_content_type, session_id, patient_id),
+        _stream_agent_response(query, history_list, image_base64, image_content_type, session_id, patient_id, doctor_id),
         media_type="text/event-stream",
     )
 

@@ -49,19 +49,19 @@ async def lifespan(app: FastAPI):
     redis_client = None
     try:
         import os
-        from langchain.globals import set_llm_cache
-        from langchain_community.cache import AsyncRedisCache
-        import redis.asyncio as redis_async
+        from langchain_core.globals import set_llm_cache
+        from langchain_community.cache import RedisCache
+        import redis
 
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
         logger.info(f"Initializing LangChain LLM Cache with Redis at {redis_url}")
         
-        # Initialize async Redis client to prevent event loop blocking
-        redis_client = redis_async.from_url(redis_url)
+        # Initialize sync Redis client
+        redis_client = redis.Redis.from_url(redis_url)
         
-        # Set the global async cache for LangChain
-        set_llm_cache(AsyncRedisCache(redis_client))
-        logger.info("LangChain global AsyncRedisCache configured successfully.")
+        # Set the global cache for LangChain
+        set_llm_cache(RedisCache(redis_client))
+        logger.info("LangChain global RedisCache configured successfully.")
     except Exception as e:
         logger.warning(f"Error initializing LLM Cache: {e}")
 
@@ -102,7 +102,7 @@ async def lifespan(app: FastAPI):
 
     try:
         if redis_client:
-            await redis_client.close()
+            redis_client.close()
             logger.info("Redis cache connection closed securely.")
     except Exception as e:
         logger.warning(f"Error closing Redis connection: {e}")
@@ -169,59 +169,9 @@ app.include_router(chat.router)
 # Patient State Endpoints
 # ═══════════════════════════════════════════════════════════════
 
-@app.get(
-    "/state/{session_id}",
-    tags=["Patient State"],
-    dependencies=[Depends(verify_internal_api_key)],
-)
-async def get_patient_state(session_id: str):
-    """Retrieve the current diagnostic state for a patient session."""
-    from app.services.patient_state import state_manager
-
-    state = state_manager.get_state(session_id)
-    if state is None:
-        return {
-            "status": "not_found",
-            "session_id": session_id,
-            "message": "No active session found. The session may have expired.",
-        }
-    return {
-        "status": "success",
-        "session_id": session_id,
-        "state": state,
-    }
-
-
-@app.delete(
-    "/state/{session_id}",
-    tags=["Patient State"],
-    dependencies=[Depends(verify_internal_api_key)],
-)
-async def clear_patient_state(session_id: str):
-    """Clear a patient session's diagnostic state."""
-    from app.services.patient_state import state_manager
-
-    cleared = state_manager.clear_session(session_id)
-    return {
-        "status": "cleared" if cleared else "not_found",
-        "session_id": session_id,
-    }
-
-
-@app.get(
-    "/state",
-    tags=["Patient State"],
-    dependencies=[Depends(verify_internal_api_key)],
-)
-async def list_sessions():
-    """List all active patient session IDs."""
-    from app.services.patient_state import state_manager
-
-    sessions = state_manager.list_sessions()
-    return {
-        "active_sessions": len(sessions),
-        "session_ids": sessions,
-    }
+# ═══════════════════════════════════════════════════════════════
+# Patient State Endpoints (Migrated to MemoryManager in Phase 4)
+# ═══════════════════════════════════════════════════════════════
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -232,7 +182,6 @@ async def list_sessions():
 async def health_check():
     """Return service health status including circuit breaker states."""
     from app.core.circuit_breaker import get_circuit_status
-    from app.services.patient_state import state_manager
 
     return {
         "status": "healthy",
@@ -247,7 +196,6 @@ async def health_check():
             "fnac_cytopathology",
             "medical_agent_chat",
         ],
-        "active_sessions": len(state_manager.list_sessions()),
         "circuit_breakers": get_circuit_status(),
     }
 

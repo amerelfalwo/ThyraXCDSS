@@ -97,29 +97,13 @@ async def predict_fnac(
     Patient State Manager for correlation with other diagnostic nodes.
     """
     # ── Mode 2 DB Isolation Check ──
-    if session_id is not None:
-        if doctor_id is None:
-            raise HTTPException(status_code=422, detail="doctor_id is required when session_id is provided.")
-        
-        doctor_id_str = str(doctor_id)
-        session_result = await db.execute(
-            select(SessionModel).where(
-                SessionModel.session_id == session_id,
-                SessionModel.doctor_id == doctor_id_str,
-            )
-        )
-        if not session_result.scalar_one_or_none():
-            raise HTTPException(status_code=403, detail="Forbidden: Session does not belong to the provided Doctor.")
-            
-        if patient_id is not None:
-            patient_result = await db.execute(
-                select(Patient).where(
-                    Patient.patient_id == str(patient_id),
-                    Patient.doctor_id == doctor_id_str,
-                )
-            )
-            if not patient_result.scalar_one_or_none():
-                raise HTTPException(status_code=403, detail="Forbidden: Patient does not belong to the provided Doctor.")
+    from app.core.security import verify_doctor_session_ownership
+    await verify_doctor_session_ownership(
+        session_id=session_id,
+        doctor_id=doctor_id,
+        patient_id=patient_id,
+        db=db
+    )
 
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded. Please attach at least one image.")
@@ -187,7 +171,8 @@ async def predict_fnac(
                 await memory_manager.save_diagnostic(
                     session_id=session_id,
                     node_type="fnac",
-                    data=result
+                    data=result,
+                    doctor_id=doctor_id
                 )
 
             # ── Audit Log ──

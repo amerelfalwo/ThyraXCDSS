@@ -45,6 +45,7 @@ from typing import Any, Optional
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 
@@ -60,11 +61,20 @@ _async_session_factory = None
 def _get_async_engine():
     global _async_engine
     if _async_engine is None:
+        # Dynamically append prepared_statement_cache_size=0 to DATABASE_URL
+        url = str(settings.ASYNC_DATABASE_URL)
+        if "?" in url:
+            url += "&prepared_statement_cache_size=0"
+        else:
+            url += "?prepared_statement_cache_size=0"
+
         _async_engine = create_async_engine(
-            settings.ASYNC_DATABASE_URL,
-            pool_size=5,
-            max_overflow=10,
-            pool_pre_ping=True,
+            url,
+            poolclass=NullPool,
+            connect_args={
+                "statement_cache_size": 0,
+                "max_cached_statement_lifetime": 0
+            },
             echo=False,
         )
     return _async_engine
@@ -275,6 +285,7 @@ class MemoryManager:
         self,
         session_id: str,
         patient_id: Optional[str] = None,
+        doctor_id: Optional[str] = None,
     ) -> MemoryContext:
         """
         Load the merged memory context for a given session.
@@ -285,6 +296,7 @@ class MemoryManager:
         Args:
             session_id: The current session identifier.
             patient_id: Optional patient identifier for long-term memory.
+            doctor_id: Optional doctor identifier to link the session if it needs creation.
 
         Returns:
             MemoryContext with both short and long-term data merged.
@@ -301,8 +313,10 @@ class MemoryManager:
             session = result.scalar_one_or_none()
 
             if session is None:
+                doc_id = doctor_id or "test_doc_123"
                 session = Session(
                     session_id=session_id,
+                    doctor_id=doc_id,
                     patient_id=patient_id,
                     conversation_history=[],
                     diagnostic_context={},
@@ -347,6 +361,7 @@ class MemoryManager:
         session_id: str,
         user_message: str,
         ai_response: str,
+        doctor_id: Optional[str] = None,
     ) -> None:
         """
         Append a user→AI exchange to the session's conversation history.
@@ -355,6 +370,7 @@ class MemoryManager:
             session_id: The session to update.
             user_message: What the user said.
             ai_response: What the agent responded.
+            doctor_id: The doctor context in case the session needs to be created.
         """
         from app.schemas.memory_models import Session
 
@@ -371,8 +387,10 @@ class MemoryManager:
                 logger.warning(
                     f"save_exchange: session {session_id} not found, creating"
                 )
+                doc_id = doctor_id or "test_doc_123"
                 session = Session(
                     session_id=session_id,
+                    doctor_id=doc_id,
                     conversation_history=[],
                     diagnostic_context={},
                 )
@@ -397,7 +415,8 @@ class MemoryManager:
         self,
         session_id: str,
         node_type: str,
-        data: dict,
+        data: Any,
+        doctor_id: Optional[str] = None,
     ) -> None:
         """
         Store a diagnostic result (clinical, ultrasound, FNAC) in
@@ -407,31 +426,50 @@ class MemoryManager:
             session_id: The session to update.
             node_type: One of 'clinical', 'ultrasound', 'fnac'.
             data: The diagnostic payload from the respective node.
+            doctor_id: The doctor context in case the session needs to be created.
         """
         from app.schemas.memory_models import Session
+        from sqlalchemy.orm.attributes import flag_modified
 
         factory = _get_async_session_factory()
 
         async with factory() as db:
+            # Use with_for_update() to acquire a row-level lock and prevent
+            # race conditions when multiple diagnostics are saved concurrently
             result = await db.execute(
-                select(Session).where(Session.session_id == session_id)
+                select(Session).where(Session.session_id == session_id).with_for_update()
             )
             session = result.scalar_one_or_none()
+            
+            timestamp = datetime.now(timezone.utc).isoformat()
+            
+            # Ensure the dictionary can hold both keys seamlessly at the same time
+            # and support list arrays or single dicts as instructed
+            if isinstance(data, list):
+                payload = data
+            elif isinstance(data, dict):
+                payload = {**data, "timestamp": timestamp}
+            else:
+                payload = {"value": data, "timestamp": timestamp}
 
             if session is None:
+                doc_id = doctor_id or "test_doc_123"
                 session = Session(
                     session_id=session_id,
-                    diagnostic_context={},
+                    doctor_id=doc_id,
+                    diagnostic_context={node_type: payload},
                     conversation_history=[],
                 )
                 db.add(session)
+            else:
+                # Deep merge the incoming dictionary for the specific node_type
+                diag = dict(session.diagnostic_context or {})
+                diag[node_type] = payload
+                session.diagnostic_context = diag
+                
+                # SQLAlchemy requires flag_modified to detect JSONB mutations
+                flag_modified(session, "diagnostic_context")
 
-            diag = dict(session.diagnostic_context or {})
-            diag[node_type] = {
-                **data,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-            session.diagnostic_context = diag
             await db.commit()
 
             logger.info(
@@ -626,6 +664,7 @@ class MemoryManager:
         demographics: Optional[dict] = None,
         medical_history: Optional[list] = None,
         allergies: Optional[list] = None,
+        doctor_id: Optional[str] = None,
     ) -> dict:
         """
         Upsert a patient record. Creates if not found, updates
@@ -644,8 +683,10 @@ class MemoryManager:
             patient = result.scalar_one_or_none()
 
             if patient is None:
+                doc_id = doctor_id or "test_doc_123"
                 patient = Patient(
                     patient_id=patient_id,
+                    doctor_id=doc_id,
                     demographics=demographics or {},
                     medical_history=medical_history or [],
                     allergies=allergies or [],

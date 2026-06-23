@@ -78,10 +78,16 @@ def run_ultrasound_inference(image_bytes: bytes, base_url: str) -> dict:
     result = process_full_pipeline(image_bytes, base_url)
     elapsed_ms = (time.perf_counter() - t0) * 1000
 
+    cls_info = result.get('classification', {})
+    if isinstance(cls_info, dict):
+        label = cls_info.get('label', 'N/A')
+    else:
+        label = "No Nodule"
+
     logger.info(
         f"[ultrasound] Inference complete — hash={img_hash} "
         f"elapsed={elapsed_ms:.1f}ms "
-        f"label={result.get('classification', {}).get('label', 'N/A')}"
+        f"label={label}"
     )
     return result
 
@@ -250,7 +256,7 @@ def run_fnac_inference(image_bytes: bytes) -> dict:
     # Map to BETHESDA_MAP indices: 1 = Bethesda II, 5 = Bethesda VI
     bethesda_idx = 5 if raw_class_idx == 1 else 1
     bethesda = BETHESDA_MAP.get(bethesda_idx, BETHESDA_MAP[0])
-    needs_review = confidence < 0.65
+    needs_review = bool(confidence < 0.65)
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
     logger.info(

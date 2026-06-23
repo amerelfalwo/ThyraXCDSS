@@ -242,6 +242,7 @@ async def run_agent(
     image_content_type: str | None = None,
     session_id: str | None = None,
     patient_id: str | None = None,
+    doctor_id: str | None = None,
 ) -> dict:
     """
     Run the ThyraX agent with the given query, conversation history,
@@ -279,6 +280,7 @@ async def run_agent(
             memory_ctx = await memory_manager.load_context(
                 session_id=session_id,
                 patient_id=patient_id,
+                doctor_id=doctor_id,
             )
             patient_context = memory_ctx.to_prompt_context()
             # Use server-stored history if available, else fallback to client-sent
@@ -399,6 +401,7 @@ async def run_agent(
                 session_id=session_id,
                 user_message=query or "Image analysis request",
                 ai_response=final_output,
+                doctor_id=doctor_id,
             )
         except Exception as e:
             logger.error(f"Failed to save exchange to memory: {e}")

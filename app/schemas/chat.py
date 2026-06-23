@@ -85,9 +85,9 @@ class AgentChatRequest(BaseModel):
         The endpoint validates data-isolation, injects patient context,
         and persists the conversation.
     """
-    patient_id: Optional[int] = None
+    patient_id: Optional[str] = None
     session_id: Optional[str] = None
-    doctor_id: Optional[int] = None
+    doctor_id: Optional[str] = None
     user_message: str
 
 

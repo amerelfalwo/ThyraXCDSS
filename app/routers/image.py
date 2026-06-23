@@ -246,19 +246,26 @@ async def predict_ultrasound_image(
                         "roi_url": roi_url,
                     }
                 except Exception as storage_err:
-                    # Fallback: encode images as base64 data URLs
-                    import base64
-                    logger.warning(f"Supabase storage unavailable, falling back to base64: {storage_err}")
+                    # Fallback: save images locally to media/ directory
+                    import os
+                    logger.warning(f"Supabase storage unavailable, falling back to local storage: {storage_err}")
 
-                    def _to_data_url(raw: bytes | None) -> str | None:
+                    os.makedirs("media", exist_ok=True)
+                    base_url_str = str(request.base_url).rstrip('/')
+
+                    def _save_local(raw: bytes | None, suffix: str) -> str | None:
                         if not raw:
                             return None
-                        return f"data:image/png;base64,{base64.b64encode(raw).decode()}"
+                        file_name = f"{uid}_{suffix}.png"
+                        file_path = os.path.join("media", file_name)
+                        with open(file_path, "wb") as f:
+                            f.write(raw)
+                        return f"{base_url_str}/media/{file_name}"
 
                     result["images"] = {
-                        "mask_url": _to_data_url(images_data.get("mask_bytes")),
-                        "overlay_url": _to_data_url(images_data.get("overlay_bytes")),
-                        "roi_url": _to_data_url(images_data.get("roi_bytes")),
+                        "mask_url": _save_local(images_data.get("mask_bytes"), "mask"),
+                        "overlay_url": _save_local(images_data.get("overlay_bytes"), "overlay"),
+                        "roi_url": _save_local(images_data.get("roi_bytes"), "roi"),
                     }
 
             # ── Forced bypass red flag ──

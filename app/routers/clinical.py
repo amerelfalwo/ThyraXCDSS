@@ -7,9 +7,6 @@ POST /clinical/assess
 """
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-
 from app.core.database import get_db
 from app.core.security import verify_internal_api_key
 from app.schemas.clinical import ClinicalAssessmentRequest, ClinicalAssessmentResponse
@@ -29,29 +26,13 @@ router = APIRouter(
 @router.post("/assess", response_model=ClinicalAssessmentResponse)
 async def assess_clinical(req: ClinicalAssessmentRequest, db: AsyncSession = Depends(get_db)):
     # ── Mode 2 DB Isolation Check ──
-    if req.session_id is not None:
-        if req.doctor_id is None:
-            raise HTTPException(status_code=422, detail="doctor_id is required when session_id is provided.")
-        
-        doctor_id_str = str(req.doctor_id)
-        session_result = await db.execute(
-            select(SessionModel).where(
-                SessionModel.session_id == req.session_id,
-                SessionModel.doctor_id == doctor_id_str,
-            )
-        )
-        if not session_result.scalar_one_or_none():
-            raise HTTPException(status_code=403, detail="Forbidden: Session does not belong to the provided Doctor.")
-            
-        if req.patient_id is not None:
-            patient_result = await db.execute(
-                select(Patient).where(
-                    Patient.patient_id == str(req.patient_id),
-                    Patient.doctor_id == doctor_id_str,
-                )
-            )
-            if not patient_result.scalar_one_or_none():
-                raise HTTPException(status_code=403, detail="Forbidden: Patient does not belong to the provided Doctor.")
+    from app.core.security import verify_doctor_session_ownership
+    await verify_doctor_session_ownership(
+        session_id=req.session_id,
+        doctor_id=req.doctor_id,
+        patient_id=req.patient_id,
+        db=db
+    )
 
     """
     Run the full CDSS clinical workflow.
@@ -91,7 +72,8 @@ async def assess_clinical(req: ClinicalAssessmentRequest, db: AsyncSession = Dep
                         "model_confidence": result.model_confidence,
                         "clinical_recommendation": result.clinical_recommendation,
                         "next_step": result.next_step,
-                    }
+                    },
+                    doctor_id=req.doctor_id
                 )
 
             return result

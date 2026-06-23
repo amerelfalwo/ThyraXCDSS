@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 
 class ClinicalAssessmentRequest(BaseModel):
-    patient_id: int = Field(..., description="Unique patient identifier")
+    patient_id: str = Field(..., description="Unique patient identifier")
     session_id: Optional[str] = Field(
         default=None,
         description="Session ID to link results to the patient's diagnostic journey.",
@@ -24,7 +24,7 @@ class ClinicalAssessmentRequest(BaseModel):
 
 class ClinicalAssessmentResponse(BaseModel):
     status: str
-    patient_id: int
+    patient_id: str
 
     # ── Disease model output (Node 1) ──
     functional_status: str
