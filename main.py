@@ -141,6 +141,7 @@ app = FastAPI(
         "- **Node 3** `POST /image/validate` — Ultrasound gatekeeper (ONNX)\n"
         "- **Node 4** `POST /image/predict` — ONNX segmentation + classification (ACR TI-RADS)\n"
         "- **Node 5** `POST /agent/chat` — Medical AI assistant (Groq/Llama-3)\n"
+        "- **NEW** `POST /ai/chat` — Simple AI chat (no IDs required)\n"
         "- **NEW** `POST /synthesis/review` — Synthesis LLM + Image Compositor Node\n"
         "- **NEW** `POST /fnac/predict` — FNAC cytopathology (Bethesda I–VI)\n\n"
         "## Context Orchestration\n"
@@ -173,13 +174,14 @@ app.mount("/media", StaticFiles(directory="media"), name="media")
 # Register Routers — All Nodes
 # ═══════════════════════════════════════════════════════════════
 
-from app.routers import chat, clinical, image, fnac, synthesis
+from app.routers import chat, clinical, image, fnac, synthesis, ai_chat
 
 app.include_router(clinical.router)
 app.include_router(image.router)
 app.include_router(fnac.router)
 app.include_router(chat.router)
 app.include_router(synthesis.router)
+app.include_router(ai_chat.router)
 
 
 
