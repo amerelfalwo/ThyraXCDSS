@@ -90,7 +90,6 @@ async def _run_weekly_evaluation():
                 
                 audit_entry = AuditLog(
                     session_id=session.session_id,
-                    doctor_id=session.doctor_id,
                     score=score,
                     reason=reason
                 )

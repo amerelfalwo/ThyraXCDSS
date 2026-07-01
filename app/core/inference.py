@@ -29,38 +29,3 @@ async def run_clinical_inference(model, df):
 
     return await run_in_threadpool(_inference)
 
-
-async def run_segmentation_inference(session, input_name, input_data):
-    """
-    Run ONNX segmentation inference in threadpool.
-
-    Args:
-        session: ONNX InferenceSession
-        input_name: Input node name
-        input_data: Preprocessed input array
-
-    Returns:
-        Model output
-    """
-    def _inference():
-        return session.run(None, {input_name: input_data})
-
-    return await run_in_threadpool(_inference)
-
-
-async def run_classification_inference(session, input_name, input_data):
-    """
-    Run ONNX classification inference in threadpool.
-
-    Args:
-        session: ONNX InferenceSession
-        input_name: Input node name
-        input_data: Preprocessed input array
-
-    Returns:
-        Model output (class probabilities)
-    """
-    def _inference():
-        return session.run(None, {input_name: input_data})
-
-    return await run_in_threadpool(_inference)

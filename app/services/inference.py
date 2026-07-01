@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 # 1. Ultrasound Inference (U-Net Segmentation + Classification)
 # ═══════════════════════════════════════════════════════════════
 
-def run_ultrasound_inference(image_bytes: bytes, base_url: str) -> dict:
+def run_ultrasound_inference(image_bytes: bytes) -> dict:
     """
     Execute the full ultrasound segmentation → classification pipeline.
 
@@ -60,7 +60,6 @@ def run_ultrasound_inference(image_bytes: bytes, base_url: str) -> dict:
 
     Args:
         image_bytes: Raw bytes of the uploaded ultrasound image.
-        base_url:    The server's base URL for constructing media paths.
 
     Returns:
         A plain dict containing segmentation masks (as raw bytes),
@@ -71,11 +70,12 @@ def run_ultrasound_inference(image_bytes: bytes, base_url: str) -> dict:
     """
     from app.segmentation.model import process_full_pipeline
 
-    img_hash = hashlib.sha256(image_bytes).hexdigest()[:12]
-    logger.info(f"[ultrasound] Starting inference — hash={img_hash}")
+    img_hash_full = hashlib.sha256(image_bytes).hexdigest()
+    img_hash_short = img_hash_full[:12]
+    logger.info(f"[ultrasound] Starting inference — hash={img_hash_short}")
 
     t0 = time.perf_counter()
-    result = process_full_pipeline(image_bytes, base_url)
+    result = process_full_pipeline(image_bytes, img_hash=img_hash_full)
     elapsed_ms = (time.perf_counter() - t0) * 1000
 
     cls_info = result.get('classification', {})
@@ -85,7 +85,7 @@ def run_ultrasound_inference(image_bytes: bytes, base_url: str) -> dict:
         label = "No Nodule"
 
     logger.info(
-        f"[ultrasound] Inference complete — hash={img_hash} "
+        f"[ultrasound] Inference complete — hash={img_hash_short} "
         f"elapsed={elapsed_ms:.1f}ms "
         f"label={label}"
     )
@@ -225,8 +225,9 @@ def run_fnac_inference(image_bytes: bytes) -> dict:
     """
     from app.core.models import load_classification_model
 
-    img_hash = hashlib.sha256(image_bytes).hexdigest()[:12]
-    logger.info(f"[fnac] Starting inference — hash={img_hash}")
+    img_hash_full = hashlib.sha256(image_bytes).hexdigest()
+    img_hash_short = img_hash_full[:12]
+    logger.info(f"[fnac] Starting inference — hash={img_hash_short}")
 
     t0 = time.perf_counter()
 
@@ -260,13 +261,18 @@ def run_fnac_inference(image_bytes: bytes) -> dict:
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
     logger.info(
-        f"[fnac] Inference complete — hash={img_hash} "
+        f"[fnac] Inference complete — hash={img_hash_short} "
         f"elapsed={elapsed_ms:.1f}ms "
         f"bethesda={bethesda['category']} confidence={confidence:.4f}"
     )
 
+    # ── Memory Management ──
+    import gc
+    del tensor, raw_outputs, output
+    gc.collect()
+
     return {
-        "input_md5": hashlib.sha256(image_bytes).hexdigest(),
+        "input_md5": img_hash_full,
         "prediction": bethesda_idx,
         "bethesda_category": bethesda["category"],
         "bethesda_label": bethesda["label"],
@@ -282,15 +288,42 @@ def run_fnac_inference(image_bytes: bytes) -> dict:
 # 3. Gatekeeper Inference (MobileNetV2 — Ultrasound validation)
 # ═══════════════════════════════════════════════════════════════
 
+# ── ImageNet normalization constants (matches MobileNetV2 training) ──
+_GATEKEEPER_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+_GATEKEEPER_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+_ULTRASOUND_THRESHOLD = 0.60
+
+def _softmax(logits: np.ndarray) -> np.ndarray:
+    """Numerically stable softmax."""
+    exp = np.exp(logits - np.max(logits))
+    return exp / exp.sum()
+
+def _preprocess_gatekeeper_image(image_bytes: bytes) -> np.ndarray:
+    """
+    Preprocess raw image bytes into the tensor expected by the ONNX gatekeeper.
+    """
+    from PIL import Image
+
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        img = img.convert("RGB")
+        img = img.resize((224, 224), Image.Resampling.BILINEAR)
+        
+    arr = np.array(img, dtype=np.float32) / 255.0  # [0, 1], HWC
+
+    mean = _GATEKEEPER_MEAN.reshape(1, 1, 3)
+    std = _GATEKEEPER_STD.reshape(1, 1, 3)
+    
+    arr = (arr - mean) / std            # Normalize
+    arr = arr.transpose(2, 0, 1)        # HWC → CHW
+    arr = np.expand_dims(arr, axis=0)   # → (1, 3, 224, 224)
+    return arr.astype(np.float32)
+
 def run_gatekeeper_inference(image_bytes: bytes) -> dict:
     """
     Run the ONNX gatekeeper model on raw image bytes.
 
     This is a **pure synchronous, CPU-bound** function.  It MUST be
     called via ``run_in_threadpool`` from async endpoints.
-
-    Delegates to the existing image_service.run_gatekeeper() which
-    already follows the correct synchronous pattern.
 
     Args:
         image_bytes: Raw bytes of the uploaded image.
@@ -299,19 +332,45 @@ def run_gatekeeper_inference(image_bytes: bytes) -> dict:
         Dict with ``is_ultrasound`` (bool), ``reason`` (str),
         and ``confidence`` (float, 0–1).
     """
-    from app.services.image_service import run_gatekeeper
+    from app.core.models import load_gatekeeper_model
 
     img_hash = hashlib.sha256(image_bytes).hexdigest()[:12]
     logger.info(f"[gatekeeper] Starting inference — hash={img_hash}")
 
     t0 = time.perf_counter()
-    result = run_gatekeeper(image_bytes)
+    
+    session = load_gatekeeper_model()
+    input_name = session.get_inputs()[0].name
+
+    tensor = _preprocess_gatekeeper_image(image_bytes)
+    raw_output = session.run(None, {input_name: tensor})[0][0]  # shape: (2,)
+
+    probs = _softmax(raw_output)
+    ultrasound_prob = float(probs[1])  # Index 1 = 'ultrasound'
+
     elapsed_ms = (time.perf_counter() - t0) * 1000
 
     logger.info(
         f"[gatekeeper] Inference complete — hash={img_hash} "
         f"elapsed={elapsed_ms:.1f}ms "
-        f"is_ultrasound={result['is_ultrasound']} "
-        f"confidence={result['confidence']:.4f}"
+        f"ultrasound_prob={ultrasound_prob:.4f} "
+        f"(threshold={_ULTRASOUND_THRESHOLD})"
     )
-    return result
+
+    # ── Memory Management ──
+    import gc
+    del tensor, raw_output, probs
+    gc.collect()
+
+    if ultrasound_prob >= _ULTRASOUND_THRESHOLD:
+        return {
+            "is_ultrasound": True,
+            "confidence": round(ultrasound_prob, 4),
+            "reason": "Verified by AI Gatekeeper",
+        }
+    else:
+        return {
+            "is_ultrasound": False,
+            "confidence": round(ultrasound_prob, 4),
+            "reason": "Image does not appear to be a medical ultrasound.",
+        }

@@ -35,157 +35,164 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 
 # ═══════════════════════════════════════════════════════════════
-# Risk Assessment — ACR TI-RADS Compliant Mapping
-# ═══════════════════════════════════════════════════════════════
-#
-# The binary classifier outputs: 0 = benign, 1 = suspicious.
-# We map the (class, confidence) pair to a clinically appropriate
-# risk level and an ACR TI-RADS analogue.
-#
-# IMPORTANT: True ACR TI-RADS scoring requires a radiologist to
-# evaluate 5 ultrasonographic feature categories:
-#   1. Composition (cystic / mixed / solid)
-#   2. Echogenicity (anechoic / hyper / iso / hypoechoic)
-#   3. Shape (wider-than-tall / taller-than-wide)
-#   4. Margin (smooth / ill-defined / lobulated / irregular / extrathyroidal)
-#   5. Echogenic foci (none / comet-tail / macrocalcifications / rim / punctate)
-#
-# Since our binary classifier does NOT evaluate these features
-# individually, the TI-RADS mapping is an APPROXIMATION based on
-# the model's confidence level — not a formal ACR TI-RADS score.
+# Radiomics & Risk Assessment — ACR TI-RADS Compliant Mapping
 # ═══════════════════════════════════════════════════════════════
 
-def assess_risk_level(class_idx: int, confidence: float) -> dict:
+def extract_radiomic_features(mask: np.ndarray, img_gray: np.ndarray, bbox: list) -> dict:
     """
-    Map binary classification output to clinically appropriate risk assessment.
+    Extracts radiomic features from the segmentation mask to estimate TI-RADS points.
+    1. Shape: Taller-than-wide.
+    2. Margin: Irregularity (solidity / circularity).
+    3. Echogenicity: Hypoechoic vs Isoechoic.
+    """
+    features = {}
+    x_min, y_min, x_max, y_max = bbox
+    w = x_max - x_min
+    h = y_max - y_min
+    
+    # 1. Shape
+    taller_than_wide = bool(h > w)
+    features["taller_than_wide"] = taller_than_wide
+    
+    # 2. Margin
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        c = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(c)
+        perimeter = cv2.arcLength(c, True)
+        hull = cv2.convexHull(c)
+        hull_area = cv2.contourArea(hull)
+        
+        solidity = area / hull_area if hull_area > 0 else 1.0
+        circularity = 4 * np.pi * (area / (perimeter * perimeter)) if perimeter > 0 else 1.0
+        
+        features["solidity"] = round(float(solidity), 3)
+        features["circularity"] = round(float(circularity), 3)
+        features["irregular_margin"] = bool(solidity < 0.85 or circularity < 0.6)
+    else:
+        features["solidity"] = 1.0
+        features["circularity"] = 1.0
+        features["irregular_margin"] = False
+
+    # 3. Echogenicity
+    roi_mask = mask[y_min:y_max+1, x_min:x_max+1]
+    roi_img = img_gray[y_min:y_max+1, x_min:x_max+1]
+    
+    nodule_mean = np.mean(roi_img[roi_mask > 0]) if np.any(roi_mask > 0) else 0.0
+    
+    h_img, w_img = img_gray.shape
+    exp_x_min = max(0, x_min - 20)
+    exp_y_min = max(0, y_min - 20)
+    exp_x_max = min(w_img, x_max + 20)
+    exp_y_max = min(h_img, y_max + 20)
+    
+    bg_mask = np.ones_like(img_gray[exp_y_min:exp_y_max, exp_x_min:exp_x_max], dtype=bool)
+    local_mask = mask[exp_y_min:exp_y_max, exp_x_min:exp_x_max]
+    bg_mask[local_mask > 0] = False
+    
+    tissue_mean = np.mean(img_gray[exp_y_min:exp_y_max, exp_x_min:exp_x_max][bg_mask]) if np.any(bg_mask) else 0.0
+    
+    features["nodule_intensity"] = round(float(nodule_mean), 2)
+    features["tissue_intensity"] = round(float(tissue_mean), 2)
+    features["hypoechoic"] = bool(nodule_mean < tissue_mean * 0.8)
+    features["markedly_hypoechoic"] = bool(nodule_mean < tissue_mean * 0.5)
+
+    return features
+
+
+def assess_risk_level(class_idx: int, confidence: float, features: dict = None) -> dict:
+    """
+    Map radiomic features and classification output to a points-based TI-RADS score.
 
     Args:
         class_idx: Predicted class (0 = benign, 1 = suspicious).
         confidence: Model confidence (0.0–1.0 scale).
+        features: Extracted radiomic features dict.
 
     Returns:
         Dict with risk_level, acr_tirads_level, and clinical_recommendation.
     """
-    if class_idx == 0:
-        # ── Benign predictions ──
-        if confidence >= 0.90:
-            return {
-                "risk_level": "Very Low Suspicion",
-                "acr_tirads_level": "TR2 (AI-estimated)",
-                "clinical_recommendation": (
-                    "Imaging findings are consistent with a benign-appearing nodule. "
-                    "No Fine Needle Aspiration (FNA) is recommended based on imaging alone. "
-                    "Follow-up ultrasound in 12–24 months if clinically indicated."
-                ),
-                "next_step": "Routine follow-up ultrasound in 12-24 months.",
-            }
-        elif confidence >= 0.70:
-            return {
-                "risk_level": "Low Suspicion",
-                "acr_tirads_level": "TR3 (AI-estimated)",
-                "clinical_recommendation": (
-                    "Imaging findings suggest a probably benign nodule. "
-                    "Consider follow-up ultrasound in 12 months. "
-                    "FNA may be considered if nodule is ≥ 2.5 cm per ACR TI-RADS guidelines."
-                ),
-                "next_step": "Consider FNA if nodule ≥ 2.5 cm; otherwise, follow-up ultrasound in 12 months.",
-            }
-        else:
-            return {
-                "risk_level": "Indeterminate",
-                "acr_tirads_level": "TR3 (AI-estimated)",
-                "clinical_recommendation": (
-                    "AI confidence is below threshold for a reliable benign classification. "
-                    "Clinical and sonographic correlation is required. "
-                    "Consider FNA if nodule is ≥ 2.5 cm, or follow-up ultrasound in 6–12 months."
-                ),
-                "next_step": "Clinical correlation required. Consider FNA if nodule ≥ 2.5 cm, else 6-12 month follow-up.",
-            }
+    if features is None:
+        features = {}
+
+    points = 0
+    
+    # 1. Shape
+    if features.get("taller_than_wide", False):
+        points += 3
+        
+    # 2. Margin
+    if features.get("irregular_margin", False):
+        points += 2
+        
+    # 3. Echogenicity
+    if features.get("markedly_hypoechoic", False):
+        points += 3
+    elif features.get("hypoechoic", False):
+        points += 2
     else:
-        # ── Suspicious predictions ──
+        points += 1 # Isoechoic
+        
+    # 4. Neural Network Suspicion (acts as composition / calcifications proxy)
+    if class_idx == 1:
         if confidence >= 0.85:
-            return {
-                "risk_level": "Very High Suspicion",
-                "acr_tirads_level": "TR5 (AI-estimated)",
-                "clinical_recommendation": (
-                    "Imaging findings are highly suspicious for malignancy. "
-                    "Fine Needle Aspiration (FNA) biopsy is strongly recommended "
-                    "for nodules ≥ 1.0 cm per ACR TI-RADS TR5 guidelines. "
-                    "Refer to endocrinology/thyroid surgery for evaluation."
-                ),
-                "next_step": "Immediate referral for FNA biopsy (if nodule ≥ 1.0 cm) and endocrinology evaluation.",
-            }
-        elif confidence >= 0.70:
-            return {
-                "risk_level": "High Suspicion",
-                "acr_tirads_level": "TR4 (AI-estimated)",
-                "clinical_recommendation": (
-                    "Imaging findings are suspicious. "
-                    "FNA biopsy is recommended for nodules ≥ 1.0 cm. "
-                    "If nodule is < 1.0 cm, consider follow-up ultrasound in 6 months. "
-                    "Clinical correlation with patient history is advised."
-                ),
-                "next_step": "Perform FNA if nodule ≥ 1.0 cm; otherwise, follow-up ultrasound in 6 months.",
-            }
+            points += 4  # Very suspicious -> Solid + Calcifications
+        elif confidence >= 0.65:
+            points += 2  # Moderately suspicious
         else:
-            return {
-                "risk_level": "Intermediate Suspicion",
-                "acr_tirads_level": "TR4 (AI-estimated)",
-                "clinical_recommendation": (
-                    "AI confidence is moderate for suspicious classification. "
-                    "FNA biopsy may be considered for nodules ≥ 1.5 cm. "
-                    "Follow-up ultrasound in 6–12 months is recommended. "
-                    "Clinical and sonographic correlation is required."
-                ),
-                "next_step": "Perform FNA if nodule ≥ 1.5 cm; otherwise, follow-up ultrasound in 6-12 months.",
-            }
+            points += 1
+            
+    # Map points to TI-RADS
+    # TR1: 0 points, TR2: 2 points, TR3: 3 points, TR4: 4-6 points, TR5: >=7 points
+    if points <= 2:
+        acr_tirads = "TR2"
+        risk_level = "Benign / Very Low Suspicion"
+        rec = "Imaging findings are consistent with a benign-appearing nodule. Follow-up ultrasound in 12–24 months."
+        next_step = "Routine follow-up ultrasound in 12-24 months."
+    elif points == 3:
+        acr_tirads = "TR3"
+        risk_level = "Mildly Suspicious"
+        rec = "Imaging findings suggest a mildly suspicious nodule. Consider FNA if nodule is >= 2.5 cm."
+        next_step = "Consider FNA if nodule >= 2.5 cm; otherwise 12 month follow-up."
+    elif 4 <= points <= 6:
+        acr_tirads = "TR4"
+        risk_level = "Moderately Suspicious"
+        rec = "Imaging findings are moderately suspicious. FNA biopsy is recommended for nodules >= 1.5 cm."
+        next_step = "Perform FNA if nodule >= 1.5 cm; otherwise, follow-up ultrasound in 6-12 months."
+    else:
+        acr_tirads = "TR5"
+        risk_level = "Highly Suspicious"
+        rec = "Imaging findings are highly suspicious for malignancy. FNA biopsy strongly recommended for nodules >= 1.0 cm."
+        next_step = "Immediate referral for FNA biopsy (if nodule >= 1.0 cm) and endocrinology evaluation."
+
+    return {
+        "risk_level": risk_level,
+        "acr_tirads_level": acr_tirads,
+        "clinical_recommendation": rec,
+        "next_step": next_step,
+        "points": points,
+    }
 
 
-def process_full_pipeline(
-    image_bytes: bytes,
-    base_url: str = "http://localhost:8000/",
-    threshold: float = 0.6,
-) -> dict:
+def perform_segmentation(img_color: np.ndarray, threshold: float = 0.6):
     """
-    Process an ultrasound image through the full segmentation + classification pipeline.
-
-    This function is CPU-bound and MUST be called inside
-    ``run_in_threadpool`` from async endpoints (brandguideline §5).
-
-    Memory Management:
-      - Models are cached in memory via @functools.lru_cache after the first load.
-
-    Args:
-        image_bytes: Raw bytes of the uploaded ultrasound image.
-        base_url: Base URL of the running API server (for media URLs).
-        threshold: Binarisation threshold for the segmentation mask.
-
+    Phase 1 & 2: Runs ONNX segmentation and overlay generation.
     Returns:
-        Dict matching the ``ImagePredictionResponse`` schema with keys:
-        status, bbox, classification, segmentation, images, and medical_disclaimer.
+        tuple: (mask_full, bbox, roi, blended)
+        If no nodule detected, returns None.
     """
-    # ── Lazy import: ONNX model loaders ──
-    from app.core.models import load_segmentation_model, load_classification_model
-
-    import hashlib
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img_hash = hashlib.sha256(image_bytes).hexdigest()
-    print(f"DEBUG: Processing image with SHA256: {img_hash}", flush=True)
-
-    img_color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    from app.core.models import load_segmentation_model
+    
     orig_rgb = cv2.cvtColor(img_color, cv2.COLOR_BGR2RGB)
     img_gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
-
-    # ────────────────────────────────────────────────────────────
-    # Phase 1: Segmentation
-    # ────────────────────────────────────────────────────────────
+    
     img_seg_in = cv2.resize(img_gray, (256, 256)).astype(np.float32) / 255.0
     img_seg_in = np.expand_dims(img_seg_in, axis=(0, -1))
 
     seg_session = load_segmentation_model()
     seg_input_name = seg_session.get_inputs()[0].name
     mask_pred = seg_session.run(None, {seg_input_name: img_seg_in})[0][0, :, :, 0]
-
+    
     logger.debug("Segmentation model kept in memory cache")
 
     mask = (mask_pred > threshold).astype(np.uint8)
@@ -195,34 +202,28 @@ def process_full_pipeline(
 
     ys, xs = np.where(mask_full > 0)
     if len(xs) < 50:
-        return {
-            "status": "success",
-            "classification": "No nodule detected in the provided ultrasound image.",
-            "confidence": None,
-            "message": (
-                "The segmentation model could not identify any thyroid nodules "
-                "or relevant regions of interest. This corresponds to ACR TI-RADS "
-                "TR1 (Benign — no nodule). If clinical suspicion remains, consider "
-                "re-imaging or referral."
-            ),
-            "bbox": None,
-        }
+        return None
 
     x_min, x_max = int(xs.min()), int(xs.max())
     y_min, y_max = int(ys.min()), int(ys.max())
     bbox = [x_min, y_min, x_max, y_max]
     roi = orig_rgb[y_min : y_max + 1, x_min : x_max + 1]
-
-    # ────────────────────────────────────────────────────────────
-    # Phase 2: Overlay generation
-    # ────────────────────────────────────────────────────────────
+    
     overlay = orig_rgb.copy()
     overlay[mask_full > 0] = [0, 255, 0]
     blended = cv2.addWeighted(orig_rgb, 0.7, overlay, 0.3, 0)
+    
+    return mask_full, bbox, roi, blended
 
-    # ────────────────────────────────────────────────────────────
-    # Phase 3: Classification
-    # ────────────────────────────────────────────────────────────
+
+def perform_classification(roi: np.ndarray):
+    """
+    Phase 3: Runs ONNX classification on the extracted ROI.
+    Returns:
+        tuple: (class_idx, confidence, raw_logit)
+    """
+    from app.core.models import load_classification_model
+    
     # medical_final model expects (380, 380) in NCHW format.
     roi_cls_in = cv2.resize(roi, (380, 380)).astype(np.float32) / 255.0
     
@@ -238,8 +239,6 @@ def process_full_pipeline(
     cls_session = load_classification_model()
     cls_input_name = cls_session.get_inputs()[0].name
     cls_pred = cls_session.run(None, {cls_input_name: roi_cls_in})[0][0]
-    
-    print(f"DEBUG: Raw classification output for {img_hash}: {cls_pred}", flush=True)
 
     logger.debug("Classification model kept in memory cache")
 
@@ -250,12 +249,71 @@ def process_full_pipeline(
         probs = exp_vals / exp_vals.sum()
         class_idx = int(np.argmax(probs))
         confidence = float(probs[class_idx])
+        raw_logit = None
     else:
         # Single output Logit -> Apply Sigmoid
         logit = float(cls_pred[0])
         prob = 1.0 / (1.0 + np.exp(-logit))
         class_idx = 1 if prob > 0.5 else 0
         confidence = prob if class_idx == 1 else 1.0 - prob
+        raw_logit = logit
+
+    return class_idx, confidence, raw_logit
+
+
+def process_full_pipeline(
+    image_bytes: bytes,
+    img_hash: str,
+    threshold: float = 0.6,
+) -> dict:
+    """
+    Process an ultrasound image through the full segmentation + classification pipeline.
+
+    This function is CPU-bound and MUST be called inside
+    ``run_in_threadpool`` from async endpoints (brandguideline §5).
+
+    Memory Management:
+      - Models are cached in memory via @functools.lru_cache after the first load.
+
+    Args:
+        image_bytes: Raw bytes of the uploaded ultrasound image.
+        img_hash: Full SHA256 hash of the image.
+        threshold: Binarisation threshold for the segmentation mask.
+
+    Returns:
+        Dict matching the ``ImagePredictionResponse`` schema with keys:
+        status, bbox, classification, segmentation, images, and medical_disclaimer.
+    """
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img_color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    # ────────────────────────────────────────────────────────────
+    # Phase 1 & 2: Segmentation and Overlay
+    # ────────────────────────────────────────────────────────────
+    seg_result = perform_segmentation(img_color, threshold)
+    
+    if seg_result is None:
+        del img_color, nparr
+        gc.collect()
+        return {
+            "status": "success",
+            "classification": "No nodule detected in the provided ultrasound image.",
+            "confidence": None,
+            "message": (
+                "The segmentation model could not identify any thyroid nodules "
+                "or relevant regions of interest. This corresponds to ACR TI-RADS "
+                "TR1 (Benign — no nodule). If clinical suspicion remains, consider "
+                "re-imaging or referral."
+            ),
+            "bbox": None,
+        }
+
+    mask_full, bbox, roi, blended = seg_result
+
+    # ────────────────────────────────────────────────────────────
+    # Phase 3: Classification
+    # ────────────────────────────────────────────────────────────
+    class_idx, confidence, raw_logit = perform_classification(roi)
 
     unique_id = str(uuid.uuid4())
 
@@ -273,10 +331,17 @@ def process_full_pipeline(
     _, roi_enc = cv2.imencode(".png", roi_bgr)
 
     # ────────────────────────────────────────────────────────────
-    # Phase 5: Clinical risk assessment
+    # Phase 5: Clinical risk assessment & Radiomics
     # ────────────────────────────────────────────────────────────
-    risk = assess_risk_level(class_idx, confidence)
+    img_gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+    features = extract_radiomic_features(mask_full, img_gray, bbox)
+    risk = assess_risk_level(class_idx, confidence, features)
     needs_review = confidence < 0.65
+
+    # ── Memory Management for heavy arrays ──
+    del img_color, img_gray, nparr
+    del mask_full, roi, blended, mask_bgr, overlay_bgr, roi_bgr
+    gc.collect()
 
     return {
         "status": "success",
@@ -286,12 +351,13 @@ def process_full_pipeline(
             "prediction": class_idx,
             "label": "suspicious" if class_idx == 1 else "benign",
             "confidence_pct": round(confidence * 100, 2),
-            "raw_logit": round(float(cls_pred[0]), 4) if len(cls_pred) == 1 else None,
+            "raw_logit": round(raw_logit, 4) if raw_logit is not None else None,
             "risk_level": risk["risk_level"],
             "acr_tirads_level": risk["acr_tirads_level"],
             "clinical_recommendation": risk["clinical_recommendation"],
             "next_step": risk["next_step"],
             "needs_manual_review": needs_review,
+            "radiomic_features": features,
         },
         "segmentation": {
             "method": "U-Net ONNX",

@@ -94,12 +94,16 @@ class ClassificationResult(BaseModel):
         False,
         description="True if classification confidence < 65% — physician must verify.",
     )
+    radiomic_features: Optional[dict] = Field(
+        None,
+        description="Extracted radiomic features from the segmentation mask (shape, margin, echogenicity).",
+    )
 
 
 class ImageUrlsResponse(BaseModel):
-    mask_url: str = Field(..., description="URL to the binary segmentation mask image")
-    overlay_url: str = Field(..., description="URL to the mask overlaid on the original ultrasound")
-    roi_url: str = Field(..., description="URL to the cropped Region of Interest (nodule)")
+    mask_url: Optional[str] = Field(None, description="URL to the binary segmentation mask image")
+    overlay_url: Optional[str] = Field(None, description="URL to the mask overlaid on the original ultrasound")
+    roi_url: Optional[str] = Field(None, description="URL to the cropped Region of Interest (nodule)")
 
 
 class SegmentationInfo(BaseModel):
@@ -146,3 +150,7 @@ class ImagePredictionResponse(BaseModel):
         default=_MEDICAL_DISCLAIMER,
         description="Mandatory clinical safety disclaimer included in every response.",
     )
+    synthesis_report: Optional[dict] = Field(
+        None, description="Optional synthesis report generated if clinical data was available in the session."
+    )
+

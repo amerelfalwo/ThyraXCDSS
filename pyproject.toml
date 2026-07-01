@@ -47,4 +47,6 @@ dependencies = [
     "httpx>=0.28.1",
     # ── NEW: Production WSGI Process Manager ──
     "gunicorn>=22.0.0",
+    # ── NEW: Supabase Client ──
+    "supabase>=2.10.0",
 ]

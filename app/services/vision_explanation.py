@@ -4,7 +4,7 @@ Vision explanation helper for deterministic CV and cytopathology outputs.
 
 import logging
 
-from fastapi.concurrency import run_in_threadpool
+
 
 logger = logging.getLogger(__name__)
 
@@ -37,43 +37,18 @@ async def generate_vision_explanation(
 
     Returns None if the LLM is unavailable or a circuit breaker is open.
     """
-    from app.core.circuit_breaker import is_circuit_open, record_success, record_failure
+    from app.core.llm_client import generate_llm_explanation
 
-    if is_circuit_open("vision_llm"):
-        logger.info("Circuit OPEN for vision_llm — skipping LLM explanation")
-        return None
+    system_msg = VISION_EXPLANATION_PROMPT.format(
+        analysis_type=analysis_type,
+        key_findings=key_findings,
+        model_confidence=model_confidence,
+        system_recommendation=system_recommendation,
+    )
 
-    try:
-        from langchain_groq import ChatGroq
-        from langchain_core.messages import SystemMessage
-        from app.core.config import settings
-
-        if not settings.GROQ_API_KEY:
-            raise ValueError("GROQ_API_KEY not configured")
-
-        llm = ChatGroq(
-            model=settings.GROQ_MODEL,
-            api_key=settings.GROQ_API_KEY,
-            temperature=0.1,
-            max_tokens=384,
-        )
-
-        system_msg = VISION_EXPLANATION_PROMPT.format(
-            analysis_type=analysis_type,
-            key_findings=key_findings,
-            model_confidence=model_confidence,
-            system_recommendation=system_recommendation,
-        )
-
-        response = await run_in_threadpool(
-            llm.invoke,
-            [SystemMessage(content=system_msg)],
-        )
-
-        record_success("vision_llm")
-        return response.content.strip()
-
-    except Exception as e:
-        record_failure("vision_llm")
-        logger.warning(f"Vision LLM explanation failed ({e}), skipping")
-        return None
+    return await generate_llm_explanation(
+        circuit_name="vision_llm",
+        system_msg=system_msg,
+        temperature=0.1,
+        max_tokens=384,
+    )

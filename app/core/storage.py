@@ -7,16 +7,19 @@ logger = logging.getLogger(__name__)
 # Lazy import — supabase SDK is optional; the app should boot without it.
 try:
     from supabase import create_client, Client as _SupabaseClient
-except ImportError:
+except ImportError as e:
     create_client = None  # type: ignore[assignment]
     _SupabaseClient = None  # type: ignore[assignment,misc]
+    import traceback
     logger.warning(
-        "supabase package not installed. "
-        "Image upload/signed-URL features will be unavailable."
+        f"supabase package not installed or failed to import. "
+        f"Exception: {e}\n{traceback.format_exc()}"
     )
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+from app.core.config import settings
+
+SUPABASE_URL = settings.SUPABASE_URL
+SUPABASE_KEY = settings.SUPABASE_KEY
 
 supabase_client = None
 

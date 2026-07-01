@@ -30,11 +30,34 @@ from sqlalchemy import select
 from app.core.database import get_db
 from app.core.security import verify_internal_api_key
 from app.schemas.fnac import FnacPredictionResponse
+from app.schemas.ai_nodes import MULTI_IMAGE_REQUEST_BODY
 from app.services.inference import run_fnac_inference
 from app.services.vision_explanation import generate_vision_explanation
-from app.schemas.memory_models import Session as SessionModel, Patient
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_numpy(obj):
+    """Convert numpy types to native Python for Pydantic serialization."""
+    import json
+    import numpy as np
+
+    class _Enc(json.JSONEncoder):
+        def default(self, o):
+            if isinstance(o, np.bool_):
+                return bool(o)
+            if isinstance(o, np.integer):
+                return int(o)
+            if isinstance(o, np.floating):
+                return float(o)
+            if isinstance(o, np.ndarray):
+                return o.tolist()
+            if isinstance(o, (bytes, bytearray)):
+                return None
+            return super().default(o)
+
+    return json.loads(json.dumps(obj, cls=_Enc))
+
 
 from app.core.responses import UnicodeJSONResponse
 
@@ -45,25 +68,7 @@ router = APIRouter(
     default_response_class=UnicodeJSONResponse,
 )
 
-MULTI_IMAGE_REQUEST_BODY = {
-    "requestBody": {
-        "required": True,
-        "content": {
-            "multipart/form-data": {
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "files": {
-                            "type": "array",
-                            "items": {"type": "string", "format": "binary"},
-                        }
-                    },
-                    "required": ["files"],
-                }
-            }
-        },
-    }
-}
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -78,8 +83,6 @@ MULTI_IMAGE_REQUEST_BODY = {
 async def predict_fnac(
     files: List[UploadFile] = File(..., description="Upload multiple images"),
     session_id: str = Form(default=None),
-    doctor_id: str = Form(default=None),
-    patient_id: str = Form(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -96,14 +99,7 @@ async def predict_fnac(
     If ``session_id`` is provided, the result is pushed to the
     Patient State Manager for correlation with other diagnostic nodes.
     """
-    # ── Mode 2 DB Isolation Check ──
-    from app.core.security import verify_doctor_session_ownership
-    await verify_doctor_session_ownership(
-        session_id=session_id,
-        doctor_id=doctor_id,
-        patient_id=patient_id,
-        db=db
-    )
+
 
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded. Please attach at least one image.")
@@ -171,8 +167,7 @@ async def predict_fnac(
                 await memory_manager.save_diagnostic(
                     session_id=session_id,
                     node_type="fnac",
-                    data=result,
-                    doctor_id=doctor_id
+                    data=result
                 )
 
             # ── Audit Log ──
@@ -196,7 +191,7 @@ async def predict_fnac(
                     filename=file.filename,
                     status="success",
                     ai_recommendation=ai_recommendation,
-                    classification=result,
+                    classification=_sanitize_numpy(result),
                     session_id=session_id,
                 )
             )

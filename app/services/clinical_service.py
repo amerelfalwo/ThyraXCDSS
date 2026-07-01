@@ -54,7 +54,7 @@ async def _generate_llm_recommendation(
     functional_status: str,
     model_confidence: float,
     clinical_recommendation: str,
-) -> str:
+) -> str | None:
     """
     Use an LLM to summarize the system's deterministic recommendation
     without adding new clinical actions.
@@ -62,50 +62,20 @@ async def _generate_llm_recommendation(
     Falls back to a rule-based recommendation if the LLM is unavailable.
     Includes circuit breaker protection.
     """
-    from app.core.circuit_breaker import is_circuit_open, record_success, record_failure
+    from app.core.llm_client import generate_llm_explanation
 
-    if is_circuit_open("clinical_llm"):
-        logger.info("Circuit OPEN for clinical_llm — skipping LLM recommendation")
-        return None
+    system_msg = EXPLANATION_PROMPT.format(
+        functional_status=functional_status,
+        model_confidence=model_confidence,
+        clinical_recommendation=clinical_recommendation,
+    )
 
-    try:
-        from langchain_groq import ChatGroq
-        from langchain_core.messages import SystemMessage
-        from app.core.config import settings
-
-        if not settings.GROQ_API_KEY:
-            raise ValueError("GROQ_API_KEY not configured")
-
-        llm = ChatGroq(
-            model=settings.GROQ_MODEL,
-            api_key=settings.GROQ_API_KEY,
-            temperature=0.1,
-            max_tokens=512,
-        )
-
-        system_msg = EXPLANATION_PROMPT.format(
-            functional_status=functional_status,
-            model_confidence=model_confidence,
-            clinical_recommendation=clinical_recommendation,
-        )
-
-        # Synchronous call executed inside a threadpool context (now via run_in_threadpool)
-        from fastapi.concurrency import run_in_threadpool
-        
-        response = await run_in_threadpool(
-            llm.invoke,
-            [
-                SystemMessage(content=system_msg),
-            ]
-        )
-
-        record_success("clinical_llm")
-        return response.content.strip()
-
-    except Exception as e:
-        record_failure("clinical_llm")
-        logger.warning(f"LLM recommendation failed ({e}), using rule-based fallback")
-        return None
+    return await generate_llm_explanation(
+        circuit_name="clinical_llm",
+        system_msg=system_msg,
+        temperature=0.1,
+        max_tokens=512,
+    )
 
 
 async def route_clinical_decision(
@@ -287,7 +257,6 @@ async def run_clinical_assessment(
         node="clinical_assess",
         action="xgboost_prediction",
         result=functional_status,
-        patient_id=req.patient_id,
         confidence=max_confidence,
         metadata={
             "probabilities": prob_dict,
@@ -298,7 +267,6 @@ async def run_clinical_assessment(
 
     return ClinicalAssessmentResponse(
         status="success",
-        patient_id=req.patient_id,
         functional_status=functional_status,
         probabilities=prob_dict,
         model_confidence=max_confidence,

@@ -33,8 +33,7 @@ X-AI-Service-Key: your-secret-key
 | 4   | `/image/validate`         | POST   | Ultrasound image gatekeeper          |
 | 5   | `/image/predict`          | POST   | Ultrasound segmentation + classification |
 | 6   | `/fnac/predict`           | POST   | FNAC cytopathology (Bethesda System) |
-| 7   | `/agent/chat/stream`      | POST   | Dual-mode streaming chat (multipart) |
-| 8   | `/agent/chat`             | POST   | Dual-mode streaming chat (JSON)      |
+| 7   | `/agent/chat`             | POST   | Dual-mode chat (JSON)                |
 
 ---
 
@@ -117,9 +116,7 @@ Run the full CDSS clinical workflow: **XGBoost disease model (Node 1)** + **Agen
 
 ```json
 {
-  "patient_id": "P001",
   "session_id": "sess-abc-123",
-  "doctor_id": "dr-ahmed",
   "age": 45,
   "on_thyroxine": 0,
   "thyroid_surgery": 0,
@@ -135,9 +132,7 @@ Run the full CDSS clinical workflow: **XGBoost disease model (Node 1)** + **Agen
 
 | Field               | Type    | Required | Description                                     |
 | :------------------ | :------ | :------- | :---------------------------------------------- |
-| `patient_id`        | string  | ✅       | Unique patient identifier                        |
 | `session_id`        | string  | ❌       | Links results to the patient's diagnostic journey |
-| `doctor_id`         | string  | ❌       | Doctor ID for data isolation check               |
 | `age`               | int     | ✅       | Patient age (0–120)                              |
 | `on_thyroxine`      | int     | ✅       | On thyroxine? (0 or 1)                           |
 | `thyroid_surgery`   | int     | ✅       | Thyroid surgery history? (0 or 1)                |
@@ -154,7 +149,6 @@ Run the full CDSS clinical workflow: **XGBoost disease model (Node 1)** + **Agen
 ```json
 {
   "status": "success",
-  "patient_id": "P001",
   "functional_status": "hyperthyroid",
   "probabilities": {
     "hypothyroid": 0.05,
@@ -178,7 +172,6 @@ Run the full CDSS clinical workflow: **XGBoost disease model (Node 1)** + **Agen
 
 | Status | Condition                           |
 | :----- | :---------------------------------- |
-| `403`  | Doctor does not own session/patient |
 | `422`  | Validation error (missing fields)  |
 | `500`  | Disease model inference failure    |
 | `503`  | LLM temporarily overloaded         |
@@ -190,9 +183,7 @@ curl -X POST https://your-domain.com/clinical/assess \
   -H "Content-Type: application/json" \
   -H "X-AI-Service-Key: YOUR_KEY" \
   -d '{
-    "patient_id": "P001",
     "session_id": "sess-abc-123",
-    "doctor_id": "dr-ahmed",
     "age": 45,
     "on_thyroxine": 0,
     "thyroid_surgery": 0,
@@ -262,7 +253,6 @@ curl -X POST https://your-domain.com/image/validate \
 | `files`      | File[]  | ✅       | One or more ultrasound image files              |
 | `force`      | boolean | ❌       | `true` to bypass gatekeeper (adds warning)      |
 | `session_id` | string  | ❌       | Links result to the patient's session           |
-| `doctor_id`  | string  | ❌       | Doctor ID for ownership verification            |
 
 ### Response `200 OK` — `List[ImagePredictionResponse]`
 
@@ -315,8 +305,7 @@ curl -X POST https://your-domain.com/image/validate \
 curl -X POST https://your-domain.com/image/predict \
   -H "X-AI-Service-Key: YOUR_KEY" \
   -F "files=@thyroid_scan.png" \
-  -F "session_id=sess-abc-123" \
-  -F "doctor_id=dr-ahmed"
+  -F "session_id=sess-abc-123"
 ```
 
 ---
@@ -331,8 +320,6 @@ curl -X POST https://your-domain.com/image/predict \
 | :----------- | :------ | :------- | :---------------------------------------- |
 | `files`      | File[]  | ✅       | One or more FNAC cytopathology image files |
 | `session_id` | string  | ❌       | Links result to the patient's session      |
-| `doctor_id`  | string  | ❌       | Doctor ID for data isolation               |
-| `patient_id` | string  | ❌       | Patient ID for data isolation              |
 
 ### Response `200 OK` — `List[FnacPredictionResponse]`
 
@@ -374,154 +361,14 @@ curl -X POST https://your-domain.com/image/predict \
 curl -X POST https://your-domain.com/fnac/predict \
   -H "X-AI-Service-Key: YOUR_KEY" \
   -F "files=@fnac_slide.png" \
-  -F "session_id=sess-abc-123" \
-  -F "doctor_id=dr-ahmed" \
-  -F "patient_id=P001"
+  -F "session_id=sess-abc-123"
 ```
 
 ---
 
-## 7. `POST /agent/chat/stream`
+## 7. `POST /agent/chat`
 
-**Dual-Mode Streaming Chat (Multipart)** — Accepts text, optional images, and returns SSE (Server-Sent Events).
-
-> [!IMPORTANT]
-> This endpoint supports direct file uploads via `multipart/form-data` and automatically routes images through the internal CV pipeline before sending to the LLM.
-
-### Request (`multipart/form-data`)
-
-| Field          | Type   | Required | Description                                     |
-| :------------- | :----- | :------- | :---------------------------------------------- |
-| `query`        | string | ❌       | The user's medical question                      |
-| `session_id`   | string | ❌       | `null` → Mode 1 (General), provided → Mode 2    |
-| `patient_id`   | string | ❌       | Required for Mode 2 (Contextual)                 |
-| `doctor_id`    | string | ❌       | Required for Mode 2 (Contextual)                 |
-| `chat_history` | string | ❌       | JSON string of previous messages (default `"[]"`) |
-| `image`        | File   | ❌       | Optional image file (ultrasound, lab report)     |
-
-### Modes
-
-#### Mode 1 — General Medical Chat (`session_id = null`)
-- No database validation
-- Uses generic medical-assistant persona
-- **Does NOT persist** conversation
-- Works as a standalone medical Q&A
-
-#### Mode 2 — Contextual Patient Chat (`session_id` provided)
-- Validates doctor → session → patient ownership
-- Injects full patient context (long-term + short-term memory + diagnostics)
-- **Persists** conversation to `sessions` table
-- Auto-injects diagnostic context (Ultrasound + FNAC results) into query
-
-### Response (SSE Stream — `text/event-stream`)
-
-Events are streamed line-by-line as `data: {...}\n\n`:
-
-```
-data: {"status": "thinking", "message": "Processing your query..."}
-
-data: {"status": "streaming", "chunk": "Based on the "}
-
-data: {"status": "streaming", "chunk": "clinical findings..."}
-
-data: {"status": "success", "query": "What does TSH 0.3 mean?", "response": "Based on the clinical findings...", "tools_used": ["thyroid_search"]}
-```
-
-### SSE Event Status Types
-
-| Status         | Description                                        |
-| :------------- | :------------------------------------------------- |
-| `thinking`     | Agent is processing the query                      |
-| `streaming`    | Real-time token chunks                             |
-| `success`      | Final complete response                            |
-| `rejected`     | Non-medical query blocked by guardrail             |
-| `retrying`     | Transient LLM error, auto-retrying                 |
-| `error`        | Permanent failure                                  |
-| `circuit_open` | Circuit breaker open, service temporarily disabled |
-
-### Error Responses
-
-| Status | Condition                                       |
-| :----- | :---------------------------------------------- |
-| `403`  | Doctor does not own session/patient (Mode 2)    |
-| `422`  | `doctor_id` missing when `session_id` provided  |
-
-### Usage — Mode 1 (General Chat)
-
-```bash
-curl -X POST https://your-domain.com/agent/chat/stream \
-  -H "X-AI-Service-Key: YOUR_KEY" \
-  -F "query=What are the symptoms of Hashimoto's thyroiditis?"
-```
-
-### Usage — Mode 2 (Contextual Chat with Image)
-
-```bash
-curl -X POST https://your-domain.com/agent/chat/stream \
-  -H "X-AI-Service-Key: YOUR_KEY" \
-  -F "query=Interpret this thyroid ultrasound" \
-  -F "session_id=sess-abc-123" \
-  -F "patient_id=P001" \
-  -F "doctor_id=dr-ahmed" \
-  -F "image=@thyroid_scan.png"
-```
-
-### Frontend Integration (JavaScript SSE)
-
-```javascript
-const formData = new FormData();
-formData.append("query", userMessage);
-formData.append("session_id", sessionId);     // null for Mode 1
-formData.append("patient_id", patientId);
-formData.append("doctor_id", doctorId);
-formData.append("chat_history", JSON.stringify(chatHistory));
-// formData.append("image", fileInput.files[0]);  // optional
-
-const response = await fetch(`${BASE_URL}/agent/chat/stream`, {
-  method: "POST",
-  headers: { "X-AI-Service-Key": API_KEY },
-  body: formData,
-});
-
-const reader = response.body.getReader();
-const decoder = new TextDecoder();
-
-while (true) {
-  const { value, done } = await reader.read();
-  if (done) break;
-  
-  const text = decoder.decode(value);
-  const lines = text.split("\n").filter(l => l.startsWith("data: "));
-  
-  for (const line of lines) {
-    const payload = JSON.parse(line.replace("data: ", ""));
-    
-    switch (payload.status) {
-      case "thinking":
-        showLoader(payload.message);
-        break;
-      case "streaming":
-        appendToChat(payload.chunk);
-        break;
-      case "success":
-        finalizeChat(payload.response, payload.tools_used);
-        break;
-      case "rejected":
-        showRejection(payload.response);
-        break;
-      case "error":
-        showError(payload.response);
-        break;
-    }
-  }
-}
-```
-
----
-
-## 8. `POST /agent/chat`
-
-**Dual-Mode Streaming Chat (JSON body)** — Same logic as `/agent/chat/stream` but accepts a JSON payload instead of multipart.
+**Dual-Mode Chat (JSON body)** — Accepts a JSON payload for chat.
 
 ### Request Body (`application/json`)
 
@@ -541,9 +388,22 @@ while (true) {
 | `patient_id`   | string | ❌       | Required for Mode 2                           |
 | `doctor_id`    | string | ❌       | Required for Mode 2                           |
 
-### Response (SSE Stream — `text/event-stream`)
+### Response (`application/json`)
 
-Same SSE format as `/agent/chat/stream` (see above).
+```json
+{
+  "status": "success",
+  "response": "Based on the clinical findings...",
+  "tools_used": ["thyroid_search"]
+}
+```
+
+### Error Responses
+
+| Status | Condition                                       |
+| :----- | :---------------------------------------------- |
+| `403`  | Doctor does not own session/patient (Mode 2)    |
+| `422`  | `doctor_id` missing when `session_id` provided  |
 
 ### Usage — Mode 1
 
@@ -568,24 +428,6 @@ curl -X POST https://your-domain.com/agent/chat \
   }'
 ```
 
----
-
-## 🔒 Data Isolation Model
-
-> [!WARNING]
-> All Mode 2 (Contextual) endpoints enforce strict data isolation. Violations return `403 Forbidden`.
-
-```
-Doctor dr-ahmed
-  └── Session sess-abc-123   ← owned by dr-ahmed
-        └── Patient P001     ← owned by dr-ahmed
-```
-
-**Rules:**
-1. A doctor can only access sessions they own.
-2. A doctor can only access patients they own.
-3. `doctor_id` is **mandatory** when `session_id` is provided.
-4. Cross-doctor access attempts are logged and blocked.
 
 ---
 

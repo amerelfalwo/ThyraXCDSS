@@ -41,6 +41,10 @@ class Settings(BaseSettings):
             return url.replace("postgresql://", "postgresql+asyncpg://", 1)
         return url
 
+    # ── Supabase ──
+    SUPABASE_URL: str = ""
+    SUPABASE_KEY: str = ""
+
     # ── ChromaDB ──
     CHROMA_PERSIST_DIR: str = str(
         Path(__file__).resolve().parent.parent.parent / "data"

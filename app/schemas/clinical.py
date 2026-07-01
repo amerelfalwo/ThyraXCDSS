@@ -2,14 +2,9 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 
 class ClinicalAssessmentRequest(BaseModel):
-    patient_id: str = Field(..., description="Unique patient identifier")
     session_id: Optional[str] = Field(
         default=None,
         description="Session ID to link results to the patient's diagnostic journey.",
-    )
-    doctor_id: Optional[str] = Field(
-        default=None,
-        description="Doctor ID for isolation check",
     )
     age: int = Field(..., ge=0, le=120, description="Patient age in years")
     on_thyroxine: int = Field(..., ge=0, le=1, description="Is patient on thyroxine? 1=yes, 0=no")
@@ -24,7 +19,6 @@ class ClinicalAssessmentRequest(BaseModel):
 
 class ClinicalAssessmentResponse(BaseModel):
     status: str
-    patient_id: str
 
     # ── Disease model output (Node 1) ──
     functional_status: str

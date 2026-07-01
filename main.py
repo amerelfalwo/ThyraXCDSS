@@ -21,7 +21,6 @@ Production Features:
 
 Architecture:
     All ML/LLM imports are lazy-loaded per function call.
-    No heavy models at module scope (512 MB RAM mandate).
 """
 
 import logging
@@ -45,7 +44,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     
-    # ── 1. Initialize LangChain LLM Cache (Redis) ──
+    # ── 1. Initialize LangChain LLM Cache (Redis or Fallback) ──
     redis_client = None
     try:
         import os
@@ -59,19 +58,36 @@ async def lifespan(app: FastAPI):
         # Initialize sync Redis client
         redis_client = redis.Redis.from_url(redis_url)
         
+        # Test connection to fail fast if Redis is down
+        redis_client.ping()
+        
         # Set the global cache for LangChain
         set_llm_cache(RedisCache(redis_client))
         logger.info("LangChain global RedisCache configured successfully.")
     except Exception as e:
-        logger.warning(f"Error initializing LLM Cache: {e}")
+        logger.warning(f"Redis not available ({e}). Falling back to InMemoryCache.")
+        from langchain_core.globals import set_llm_cache
+        from langchain_core.caches import InMemoryCache
+        set_llm_cache(InMemoryCache())
 
-    # ── 2. Verify Database Connectivity ──
+    # ── 1.5. Initialize MCP Client Servers ──
     try:
-        from app.core.database import engine
+        from app.agent.mcp_servers.mcp_client import mcp_client_manager
+        await mcp_client_manager.initialize()
+        logger.info("MCP servers initialized successfully.")
+    except Exception as e:
+        logger.error(f"Error initializing MCP servers during startup: {e}")
+
+    # ── 2. Verify Database Connectivity & Create Missing Tables ──
+    try:
+        from app.core.database import engine, Base
+        from app.schemas.memory_models import Patient, Session, DiagnosticImage, AuditLog, Doctor
         from sqlalchemy import text
         async with engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
-        logger.info("Database connectivity verified successfully.")
+            # Auto-create missing tables like diagnostic_images
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database connectivity verified and missing tables created successfully.")
     except Exception as e:
         logger.warning(f"Error connecting to database during startup: {e}")
 
@@ -125,7 +141,7 @@ app = FastAPI(
         "- **Node 3** `POST /image/validate` — Ultrasound gatekeeper (ONNX)\n"
         "- **Node 4** `POST /image/predict` — ONNX segmentation + classification (ACR TI-RADS)\n"
         "- **Node 5** `POST /agent/chat` — Medical AI assistant (Groq/Llama-3)\n"
-        "- **Node 5** `POST /agent/chat/stream` — Medical AI assistant (SSE streaming)\n"
+        "- **NEW** `POST /synthesis/review` — Synthesis LLM + Image Compositor Node\n"
         "- **NEW** `POST /fnac/predict` — FNAC cytopathology (Bethesda I–VI)\n\n"
         "## Context Orchestration\n"
         "- `GET /state/{session_id}` — Retrieve patient diagnostic context\n"
@@ -157,21 +173,14 @@ app.mount("/media", StaticFiles(directory="media"), name="media")
 # Register Routers — All Nodes
 # ═══════════════════════════════════════════════════════════════
 
-from app.routers import chat, clinical, image, fnac
+from app.routers import chat, clinical, image, fnac, synthesis
 
 app.include_router(clinical.router)
 app.include_router(image.router)
 app.include_router(fnac.router)
 app.include_router(chat.router)
+app.include_router(synthesis.router)
 
-
-# ═══════════════════════════════════════════════════════════════
-# Patient State Endpoints
-# ═══════════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════════
-# Patient State Endpoints (Migrated to MemoryManager in Phase 4)
-# ═══════════════════════════════════════════════════════════════
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -20,10 +20,15 @@ def load_segmentation_model():
     """Load and return a cached segmentation ONNX model session."""
     import onnxruntime as ort
 
+    sess_options = ort.SessionOptions()
+    sess_options.intra_op_num_threads = 1
+    sess_options.inter_op_num_threads = 1
+
     model_path = BASE_DIR / "models" / "compressed" / "segmentation.onnx"
     logger.info(f"Loading segmentation ONNX model from {model_path} into memory cache")
     return ort.InferenceSession(
         str(model_path),
+        sess_options=sess_options,
         providers=["CPUExecutionProvider"],
     )
 
@@ -36,6 +41,10 @@ def load_classification_model():
     """
     import onnxruntime as ort
 
+    sess_options = ort.SessionOptions()
+    sess_options.intra_op_num_threads = 1
+    sess_options.inter_op_num_threads = 1
+
     model_path = BASE_DIR / "models" / "compressed" / "efficientnet_b4_medical_final.onnx"
     if not model_path.exists():
         raise FileNotFoundError(f"Classification model not found at {model_path}")
@@ -43,6 +52,7 @@ def load_classification_model():
     logger.info(f"Loading classification ONNX model from {model_path} into memory cache")
     return ort.InferenceSession(
         str(model_path),
+        sess_options=sess_options,
         providers=["CPUExecutionProvider"],
     )
 
@@ -55,10 +65,15 @@ def load_gatekeeper_model():
     """
     import onnxruntime as ort
 
+    sess_options = ort.SessionOptions()
+    sess_options.intra_op_num_threads = 1
+    sess_options.inter_op_num_threads = 1
+
     model_path = BASE_DIR / "models" / "compressed" / "gatekeeper.onnx"
     logger.info(f"Loading gatekeeper ONNX model from {model_path} into memory cache")
     return ort.InferenceSession(
         str(model_path),
+        sess_options=sess_options,
         providers=["CPUExecutionProvider"],
     )
 
@@ -71,6 +86,10 @@ def load_fnac_gatekeeper_model():
     """
     import onnxruntime as ort
 
+    sess_options = ort.SessionOptions()
+    sess_options.intra_op_num_threads = 1
+    sess_options.inter_op_num_threads = 1
+
     model_path = BASE_DIR / "models" / "compressed" / "fnac_gatekeeper.onnx"
     if not model_path.exists():
         # Handle graceful degradation if not deployed yet
@@ -78,6 +97,7 @@ def load_fnac_gatekeeper_model():
     logger.info(f"Loading FNAC gatekeeper ONNX model from {model_path} into memory cache")
     return ort.InferenceSession(
         str(model_path),
+        sess_options=sess_options,
         providers=["CPUExecutionProvider"],
     )
 
@@ -93,6 +113,10 @@ def load_fnac_model():
     """
     import onnxruntime as ort
 
+    sess_options = ort.SessionOptions()
+    sess_options.intra_op_num_threads = 1
+    sess_options.inter_op_num_threads = 1
+
     model_path = BASE_DIR / "models" / "compressed" / "fnac_bethesda.onnx"
     if not model_path.exists():
         raise FileNotFoundError(
@@ -102,5 +126,6 @@ def load_fnac_model():
     logger.info(f"Loading FNAC ONNX model from {model_path} into memory cache")
     return ort.InferenceSession(
         str(model_path),
+        sess_options=sess_options,
         providers=["CPUExecutionProvider"],
     )

@@ -20,9 +20,9 @@ Threading Pattern:
 """
 
 import logging
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, Form
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -30,12 +30,38 @@ from sqlalchemy import select
 from app.core.security import verify_internal_api_key
 from app.core.storage import upload_image_to_storage, get_signed_url
 from app.core.database import get_db
-from app.core.db_models import PatientSession
 from app.schemas.image import ImagePredictionResponse, ImageValidationResponse
+from app.schemas.ai_nodes import MULTI_IMAGE_REQUEST_BODY
 from app.services.inference import run_ultrasound_inference, run_gatekeeper_inference
 from app.services.vision_explanation import generate_vision_explanation
 
 logger = logging.getLogger(__name__)
+
+def _sanitize_numpy(obj):
+    """Convert numpy types to native Python for Pydantic serialization.
+
+    Uses a JSON round-trip with a custom encoder so the C-level json
+    module handles traversal — no Python-level recursion limit issues.
+    """
+    import json
+    import numpy as np
+
+    class _Enc(json.JSONEncoder):
+        def default(self, o):
+            if isinstance(o, np.bool_):
+                return bool(o)
+            if isinstance(o, np.integer):
+                return int(o)
+            if isinstance(o, np.floating):
+                return float(o)
+            if isinstance(o, np.ndarray):
+                return o.tolist()
+            if isinstance(o, (bytes, bytearray)):
+                return None
+            return super().default(o)
+
+    return json.loads(json.dumps(obj, cls=_Enc))
+
 
 from app.core.responses import UnicodeJSONResponse
 
@@ -45,27 +71,18 @@ router = APIRouter(
     dependencies=[Depends(verify_internal_api_key)],
     default_response_class=UnicodeJSONResponse,
 )
+from app.services.memory_manager import memory_manager
+from fastapi import Response
 
-MULTI_IMAGE_REQUEST_BODY = {
-    "requestBody": {
-        "required": True,
-        "content": {
-            "multipart/form-data": {
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "files": {
-                            "type": "array",
-                            "items": {"type": "string", "format": "binary"},
-                        }
-                    },
-                    "required": ["files"],
-                }
-            }
-        },
-    }
-}
-
+@router.get("/view/{image_id}")
+async def get_image_view(image_id: int):
+    """
+    Retrieves a diagnostic image from the database.
+    """
+    image_data = await memory_manager.get_image(image_id)
+    if not image_data:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return Response(content=image_data, media_type="image/png")
 
 # ═══════════════════════════════════════════════════════════════
 # Node 3: /image/validate — Local ONNX Gatekeeper
@@ -167,10 +184,9 @@ async def validate_ultrasound_image(
 )
 async def predict_ultrasound_image(
     request: Request,
-    files: List[UploadFile] = File(..., description="Upload multiple images"),
-    force: bool = False,
-    session_id: str = Form(default=None),
-    doctor_id: str = Form(default=None),
+    files: List[UploadFile] = File(..., description="Upload one or more ultrasound images"),
+    force: bool = Query(False, description="Force prediction even if gatekeeper fails"),
+    session_id: Optional[str] = Form(None, description="Enter Session ID for automated Synthesis trigger"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -192,7 +208,6 @@ async def predict_ultrasound_image(
         files:   Uploaded ultrasound images.
         force:   If True, marks the response with a bypass warning.
         session_id: Optional session ID for patient state tracking.
-        doctor_id:  Optional doctor ID for ownership verification.
     """
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded. Please attach at least one image.")
@@ -220,53 +235,36 @@ async def predict_ultrasound_image(
             # app.services.inference which runs U-Net segmentation +
             # classification entirely on a worker thread.
             result = await run_in_threadpool(
-                run_ultrasound_inference, image_bytes, base_url
+                run_ultrasound_inference, image_bytes
             )
             result["filename"] = file.filename
 
-            # ── Step 3: Async I/O — Upload images to storage ──
+            # ── Step 3: Async I/O — Upload images to database ──
             # (runs on the event loop, non-blocking)
             images_data = result.pop("images", None)
             if images_data and "unique_id" in images_data:
                 uid = images_data["unique_id"]
                 folder = session_id or "unassigned"
 
-                try:
-                    mask_path = await upload_image_to_storage(images_data.get("mask_bytes"), f"{uid}_mask.png", folder_path=folder)
-                    overlay_path = await upload_image_to_storage(images_data.get("overlay_bytes"), f"{uid}_overlay.png", folder_path=folder)
-                    roi_path = await upload_image_to_storage(images_data.get("roi_bytes"), f"{uid}_roi.png", folder_path=folder)
+                async def _save_db(raw: bytes | None, image_type: str) -> str | None:
+                    if not raw:
+                        return None
+                    try:
+                        image_id = await memory_manager.save_image(
+                            session_id=folder,
+                            image_data=raw,
+                            image_type=image_type
+                        )
+                        return f"/image/view/{image_id}"
+                    except Exception as err:
+                        logger.error(f"Failed to save {image_type} to DB: {err}")
+                        return None
 
-                    mask_url = await get_signed_url(mask_path)
-                    overlay_url = await get_signed_url(overlay_path)
-                    roi_url = await get_signed_url(roi_path)
-
-                    result["images"] = {
-                        "mask_url": mask_url,
-                        "overlay_url": overlay_url,
-                        "roi_url": roi_url,
-                    }
-                except Exception as storage_err:
-                    # Fallback: save images locally to media/ directory
-                    import os
-                    logger.warning(f"Supabase storage unavailable, falling back to local storage: {storage_err}")
-
-                    os.makedirs("media", exist_ok=True)
-                    base_url_str = str(request.base_url).rstrip('/')
-
-                    def _save_local(raw: bytes | None, suffix: str) -> str | None:
-                        if not raw:
-                            return None
-                        file_name = f"{uid}_{suffix}.png"
-                        file_path = os.path.join("media", file_name)
-                        with open(file_path, "wb") as f:
-                            f.write(raw)
-                        return f"{base_url_str}/media/{file_name}"
-
-                    result["images"] = {
-                        "mask_url": _save_local(images_data.get("mask_bytes"), "mask"),
-                        "overlay_url": _save_local(images_data.get("overlay_bytes"), "overlay"),
-                        "roi_url": _save_local(images_data.get("roi_bytes"), "roi"),
-                    }
+                result["images"] = {
+                    "mask_url": await _save_db(images_data.get("mask_bytes"), "mask"),
+                    "overlay_url": await _save_db(images_data.get("overlay_bytes"), "overlay"),
+                    "roi_url": await _save_db(images_data.get("roi_bytes"), "roi"),
+                }
 
             # ── Forced bypass red flag ──
             if force:
@@ -304,21 +302,15 @@ async def predict_ultrasound_image(
                     result["ai_recommendation"] = ai_recommendation
 
             # ── Step 5: Async I/O — Push to Database ──
-            if session_id and doctor_id:
-                stmt = select(PatientSession).where(
-                    PatientSession.session_id == session_id,
-                    PatientSession.doctor_id == doctor_id
+            if session_id:
+                await memory_manager.save_diagnostic(
+                    session_id=session_id,
+                    node_type="ultrasound",
+                    data=dict(result)  # copy to prevent circular ref
                 )
-                session_result = await db.execute(stmt)
-                patient_session = session_result.scalar_one_or_none()
 
-                if patient_session:
-                    patient_session.ultrasound_result = result
-                    await db.commit()
-                else:
-                    logger.warning(f"PatientSession not found for session_id={session_id} and doctor_id={doctor_id}")
-            elif session_id:
-                logger.warning("session_id provided without doctor_id, skipping database update.")
+                # Automated synthesis trigger has been removed to keep Node 4 independent.
+
 
             # ── Audit log ──
             from app.core.audit import log_audit_event
@@ -348,7 +340,7 @@ async def predict_ultrasound_image(
                     metadata={"empty_mask": True, "session_id": session_id, "filename": file.filename},
                 )
 
-            results.append(result)
+            results.append(_sanitize_numpy(result))
 
         except Exception as e:
             results.append(

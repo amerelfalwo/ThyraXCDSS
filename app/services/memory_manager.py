@@ -54,41 +54,10 @@ logger = logging.getLogger(__name__)
 
 # ─── Async Engine (module-level singleton) ────────────────────
 
-_async_engine = None
-_async_session_factory = None
-
-
-def _get_async_engine():
-    global _async_engine
-    if _async_engine is None:
-        # Dynamically append prepared_statement_cache_size=0 to DATABASE_URL
-        url = str(settings.ASYNC_DATABASE_URL)
-        if "?" in url:
-            url += "&prepared_statement_cache_size=0"
-        else:
-            url += "?prepared_statement_cache_size=0"
-
-        _async_engine = create_async_engine(
-            url,
-            poolclass=NullPool,
-            connect_args={
-                "statement_cache_size": 0,
-                "max_cached_statement_lifetime": 0
-            },
-            echo=False,
-        )
-    return _async_engine
-
+from app.core.database import AsyncSessionLocal
 
 def _get_async_session_factory():
-    global _async_session_factory
-    if _async_session_factory is None:
-        _async_session_factory = sessionmaker(
-            bind=_get_async_engine(),
-            class_=AsyncSession,
-            expire_on_commit=False,
-        )
-    return _async_session_factory
+    return AsyncSessionLocal
 
 
 # ─── Data Transfer Object ────────────────────────────────────
@@ -203,81 +172,7 @@ class MemoryManager:
     MemoryContext for prompt injection.
     """
 
-    async def get_injected_context(self, patient_id: int | str, session_id: str, db: AsyncSession) -> str:
-        """
-        Query the Patient table (Long-term memory) to get chronic conditions or historical summaries.
-        Query the Session table (Short-term memory) to get the recent conversation history.
-        Query PatientSession to get recent diagnostic context.
-        Format and return a single, clean system_prompt string.
-        """
-        from app.schemas.memory_models import Patient, Session
-        from app.core.db_models import PatientSession
-        from sqlalchemy import select
-        import json
 
-        patient_id_str = str(patient_id)
-        
-        # Load Patient (Long-term memory)
-        patient_stmt = select(Patient).where(Patient.patient_id == patient_id_str)
-        patient_result = await db.execute(patient_stmt)
-        patient = patient_result.scalar_one_or_none()
-        
-        # Load Session (Short-term memory)
-        session_stmt = select(Session).where(Session.session_id == session_id)
-        session_result = await db.execute(session_stmt)
-        session = session_result.scalar_one_or_none()
-
-        # Load Diagnostics (from patient_sessions)
-        diag_stmt = select(PatientSession).where(PatientSession.session_id == session_id)
-        diag_result = await db.execute(diag_stmt)
-        patient_session = diag_result.scalar_one_or_none()
-
-        base_persona = (
-            "You are ThyraX, an advanced Clinical Decision Support System. "
-            "Your role is to assist the doctor by providing evidence-based insights "
-            "based on the patient's long-term history and the current short-term conversation context."
-        )
-
-        patient_context = "No long-term patient history found."
-        if patient:
-            medical_history = patient.medical_history if isinstance(patient.medical_history, list) else []
-            allergies = patient.allergies if isinstance(patient.allergies, list) else []
-            med_str = ", ".join(str(m) for m in medical_history) if medical_history else "None"
-            all_str = ", ".join(str(a) for a in allergies) if allergies else "None"
-            patient_context = (
-                f"--- Patient Long-Term Memory ---\n"
-                f"Patient ID: {patient.patient_id}\n"
-                f"Medical History/Chronic Conditions: {med_str}\n"
-                f"Allergies: {all_str}\n"
-                f"Historical Summary: {patient.long_term_summary or 'None'}"
-            )
-
-        diagnostic_context = "--- Current Diagnostic Data for this Session ---\nNo diagnostic data found."
-        if patient_session:
-            diag_parts = []
-            if getattr(patient_session, 'clinical_assessment', None):
-                diag_parts.append(f"- Clinical Assessment (Labs): {json.dumps(patient_session.clinical_assessment)}")
-            if getattr(patient_session, 'ultrasound_result', None):
-                diag_parts.append(f"- Ultrasound Results: {json.dumps(patient_session.ultrasound_result)}")
-            if getattr(patient_session, 'fnac_result', None):
-                diag_parts.append(f"- Cytology (FNAC): {json.dumps(patient_session.fnac_result)}")
-            
-            if diag_parts:
-                diagnostic_context = "--- Current Diagnostic Data for this Session ---\n" + "\n".join(diag_parts)
-
-        session_context = "No recent session history found."
-        if session:
-            history = session.conversation_history or []
-            if history:
-                lines = []
-                for msg in history[-10:]: # Limit to recent 10 to avoid huge context
-                    role = msg.get("role", "unknown").upper()
-                    content = msg.get("content", "")
-                    lines.append(f"{role}: {content}")
-                session_context = "--- Recent Conversation History (Short-Term Memory) ---\n" + "\n".join(lines)
-
-        system_prompt = f"{base_persona}\n\n{patient_context}\n\n{diagnostic_context}\n\n{session_context}"
-        return system_prompt
 
     # ── Context Loading ───────────────────────────────────────
 
@@ -313,11 +208,9 @@ class MemoryManager:
             session = result.scalar_one_or_none()
 
             if session is None:
-                doc_id = doctor_id or "test_doc_123"
                 session = Session(
                     session_id=session_id,
-                    doctor_id=doc_id,
-                    patient_id=patient_id,
+                    doctor_id=doctor_id or "test_doc_123",
                     conversation_history=[],
                     diagnostic_context={},
                     session_summary="",
@@ -336,7 +229,7 @@ class MemoryManager:
             )
 
             # ── Load Patient (long-term) if linked ──
-            effective_patient_id = patient_id or session.patient_id
+            effective_patient_id = patient_id
             if effective_patient_id:
                 result = await db.execute(
                     select(Patient).where(
@@ -387,10 +280,9 @@ class MemoryManager:
                 logger.warning(
                     f"save_exchange: session {session_id} not found, creating"
                 )
-                doc_id = doctor_id or "test_doc_123"
                 session = Session(
                     session_id=session_id,
-                    doctor_id=doc_id,
+                    doctor_id=doctor_id or "test_doc_123",
                     conversation_history=[],
                     diagnostic_context={},
                 )
@@ -409,6 +301,41 @@ class MemoryManager:
                 f"(total messages: {len(history)})"
             )
 
+    # ── JSON Sanitizer for JSONB Compatibility ───────────────
+
+    @staticmethod
+    def _sanitize_for_json(obj: Any) -> Any:
+        """
+        Recursively convert numpy / non-native types to JSON-safe
+        Python primitives before insertion into a JSONB column.
+
+        Handles:
+          - numpy.bool_       → bool
+          - numpy.integer     → int
+          - numpy.floating    → float
+          - numpy.ndarray     → list (recursive)
+          - bytes / bytearray → <stripped>  (not JSON serializable)
+          - dict / list        → recurse into children
+        """
+        import numpy as np
+
+        if isinstance(obj, dict):
+            return {k: MemoryManager._sanitize_for_json(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [MemoryManager._sanitize_for_json(v) for v in obj]
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, (bytes, bytearray)):
+            # Raw binary data cannot go into JSONB — skip it
+            return None
+        return obj
+
     # ── Save Diagnostic Results ───────────────────────────────
 
     async def save_diagnostic(
@@ -422,16 +349,22 @@ class MemoryManager:
         Store a diagnostic result (clinical, ultrasound, FNAC) in
         the session's diagnostic_context JSONB.
 
+        All incoming data is sanitized to convert numpy types
+        (bool_, int64, float32, ndarray) to native Python primitives
+        before insertion, preventing asyncpg serialization errors.
+
         Args:
             session_id: The session to update.
             node_type: One of 'clinical', 'ultrasound', 'fnac'.
             data: The diagnostic payload from the respective node.
-            doctor_id: The doctor context in case the session needs to be created.
         """
         from app.schemas.memory_models import Session
         from sqlalchemy.orm.attributes import flag_modified
 
         factory = _get_async_session_factory()
+
+        # ── Sanitize all numpy types to native Python before JSONB insert ──
+        data = self._sanitize_for_json(data)
 
         async with factory() as db:
             # Use with_for_update() to acquire a row-level lock and prevent
@@ -453,10 +386,9 @@ class MemoryManager:
                 payload = {"value": data, "timestamp": timestamp}
 
             if session is None:
-                doc_id = doctor_id or "test_doc_123"
                 session = Session(
                     session_id=session_id,
-                    doctor_id=doc_id,
+                    doctor_id=doctor_id or "test_doc_123",
                     diagnostic_context={node_type: payload},
                     conversation_history=[],
                 )
@@ -480,69 +412,7 @@ class MemoryManager:
 
     MAX_HISTORY_MESSAGES = 10
 
-    async def summarize_history_if_needed(self, db: AsyncSession, session_id: str, current_history: list) -> list:
-        """
-        Summarizes old messages if the conversation history exceeds MAX_HISTORY_MESSAGES.
-        Replaces the summarized old messages with a new summary string while preserving the 4 most recent messages.
-        """
-        from app.schemas.memory_models import Session
-        
-        if len(current_history) > self.MAX_HISTORY_MESSAGES:
-            keep_recent = 4
-            messages_to_summarize = current_history[:-keep_recent]
-            recent_messages = current_history[-keep_recent:]
-            
-            text_block = "\n".join(
-                f"{msg.get('role', 'unknown')}: {msg.get('content', '')}"
-                for msg in messages_to_summarize
-            )
 
-            prompt = (
-                "You are a medical AI assistant. Produce a concise clinical "
-                "summary of the following conversation history.\n\n"
-                "CONVERSATION:\n"
-                f"{text_block}\n\n"
-                "Write an updated clinical summary (max 300 words). "
-                "Focus on diagnoses, test results, medications, and "
-                "clinical decisions."
-            )
-
-            try:
-                from langchain_groq import ChatGroq
-                keys = settings.get_groq_keys()
-                if not keys:
-                    logger.error("No Groq keys for summarization")
-                    return current_history
-
-                llm = ChatGroq(
-                    model=settings.GROQ_MODEL,
-                    api_key=keys[0],
-                    temperature=0.3,
-                )
-                res = await llm.ainvoke(prompt)
-                new_summary = res.content
-
-                summary_msg = {
-                    "role": "system",
-                    "content": f"Previous Summary: {new_summary}",
-                    "ts": datetime.now(timezone.utc).isoformat()
-                }
-                new_history = [summary_msg] + recent_messages
-                
-                # Safely update the Session table in Supabase
-                result = await db.execute(select(Session).where(Session.session_id == session_id))
-                session = result.scalar_one_or_none()
-                if session:
-                    session.conversation_history = new_history
-                    await db.commit()
-                    logger.info(f"Summarized old messages for session {session_id} (kept recent {keep_recent})")
-                
-                return new_history
-            except Exception as e:
-                logger.error(f"Summarization failed for session {session_id}: {e}")
-                return current_history
-
-        return current_history
 
     async def summarize_and_prune(
         self,
@@ -604,18 +474,8 @@ class MemoryManager:
             )
 
             try:
-                from langchain_groq import ChatGroq
-
-                keys = settings.get_groq_keys()
-                if not keys:
-                    logger.error("No Groq keys for summarization")
-                    return
-
-                llm = ChatGroq(
-                    model=settings.GROQ_MODEL,
-                    api_key=keys[0],
-                    temperature=0.3,
-                )
+                from app.core.llm_client import get_shared_llm
+                llm = get_shared_llm(temperature=0.3)
                 res = await llm.ainvoke(prompt)
                 new_summary = res.content
 
@@ -629,29 +489,8 @@ class MemoryManager:
                     f"({len(messages_to_summarize)} msgs → summary)"
                 )
 
-                # Propagate to Patient long-term memory if linked
-                if session.patient_id:
-                    patient_result = await db.execute(
-                        select(Patient).where(
-                            Patient.patient_id == session.patient_id
-                        )
-                    )
-                    patient = patient_result.scalar_one_or_none()
-                    if patient:
-                        existing_lt = patient.long_term_summary or ""
-                        # Append session summary with timestamp
-                        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-                        updated_lt = (
-                            f"{existing_lt}\n\n"
-                            f"--- Session {session_id} ({ts}) ---\n"
-                            f"{new_summary}"
-                        ).strip()
-                        patient.long_term_summary = updated_lt
-                        await db.commit()
-                        logger.info(
-                            f"Updated Patient {session.patient_id} "
-                            f"long-term summary"
-                        )
+                # Propagation removed because Session no longer tracks patient_id
+                pass
 
             except Exception as e:
                 logger.error(f"Summarization failed for {session_id}: {e}")
@@ -742,29 +581,67 @@ class MemoryManager:
             logger.info(f"Session {session_id} closed")
             return True
 
-    async def link_session_to_patient(
-        self, session_id: str, patient_id: str
-    ) -> bool:
-        """Link an anonymous session to a patient record."""
-        from app.schemas.memory_models import Session
-
+    # ── Image Storage (Database) ──────────────────────────────
+    
+    async def save_image(
+        self,
+        session_id: str,
+        image_data: bytes,
+        image_type: str = "synthesis_composite",
+        doctor_id: Optional[str] = None,
+    ) -> int:
+        """
+        Saves an image directly to the database.
+        Returns the ID of the saved image.
+        """
+        from app.schemas.memory_models import Session, DiagnosticImage
+        
         factory = _get_async_session_factory()
-
+        
         async with factory() as db:
             result = await db.execute(
                 select(Session).where(Session.session_id == session_id)
             )
             session = result.scalar_one_or_none()
-
             if session is None:
-                return False
-
-            session.patient_id = patient_id
-            await db.commit()
-            logger.info(
-                f"Linked session {session_id} → patient {patient_id}"
+                session = Session(
+                    session_id=session_id,
+                    doctor_id=doctor_id or "test_doc_123",
+                    conversation_history=[],
+                    diagnostic_context={},
+                )
+                db.add(session)
+                await db.commit()
+                
+            diag_image = DiagnosticImage(
+                session_id=session_id,
+                image_data=image_data,
+                image_type=image_type
             )
-            return True
+            db.add(diag_image)
+            await db.commit()
+            await db.refresh(diag_image)
+            
+            logger.info(f"Saved {image_type} image {diag_image.id} for session {session_id}")
+            return diag_image.id
+
+    async def get_image(self, image_id: int) -> Optional[bytes]:
+        """
+        Retrieves image bytes by image_id.
+        """
+        from app.schemas.memory_models import DiagnosticImage
+        
+        factory = _get_async_session_factory()
+        
+        async with factory() as db:
+            result = await db.execute(
+                select(DiagnosticImage).where(DiagnosticImage.id == image_id)
+            )
+            diag_image = result.scalar_one_or_none()
+            if diag_image:
+                return diag_image.image_data
+            return None
+
 
 
 # ── Module-level singleton ──

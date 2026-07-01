@@ -28,6 +28,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
+from sqlalchemy import LargeBinary
 
 from app.core.database import Base
 
@@ -71,7 +72,6 @@ class Doctor(Base):
     )
 
     patients = relationship("Patient", back_populates="doctor", cascade="all, delete-orphan")
-    sessions = relationship("Session", back_populates="doctor", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Doctor(doctor_id={self.doctor_id!r})>"
@@ -113,13 +113,6 @@ class Patient(Base):
         nullable=False,
     )
 
-    # Relationship: one Patient → many Sessions
-    sessions = relationship(
-        "Session",
-        back_populates="patient",
-        cascade="all, delete-orphan",
-        lazy="selectin",
-    )
     doctor = relationship("Doctor", back_populates="patients")
 
     def __repr__(self) -> str:
@@ -132,7 +125,6 @@ class Session(Base):
 
     Fields:
         session_id:            Unique session identifier (UUID).
-        patient_id:            FK → Patient. Nullable for anonymous sessions.
         conversation_history:  JSONB — list of {role, content, timestamp} dicts,
                                representing the active dialogue window.
         diagnostic_context:    JSONB — accumulated results from clinical,
@@ -147,13 +139,7 @@ class Session(Base):
     __tablename__ = "sessions"
 
     session_id = Column(String(128), primary_key=True, index=True)
-    doctor_id = Column(String(128), ForeignKey("doctors.doctor_id", ondelete="CASCADE"), nullable=False, index=True)
-    patient_id = Column(
-        String(128),
-        ForeignKey("patients.patient_id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-    )
+    doctor_id = Column(String(128), ForeignKey("doctors.doctor_id", ondelete="CASCADE"), nullable=False, index=True, default="test_doc_123")
     conversation_history = Column(JSONB, nullable=True, default=list)
     diagnostic_context = Column(JSONB, nullable=True, default=dict)
     session_summary = Column(Text, nullable=True, default="")
@@ -170,15 +156,8 @@ class Session(Base):
         nullable=False,
     )
 
-    # Relationship: many Sessions → one Patient
-    patient = relationship("Patient", back_populates="sessions")
-    doctor = relationship("Doctor", back_populates="sessions")
-
     def __repr__(self) -> str:
-        return (
-            f"<Session(session_id={self.session_id!r}, "
-            f"patient_id={self.patient_id!r})>"
-        )
+        return f"<Session(session_id={self.session_id!r})>"
 
 from sqlalchemy import Integer
 
@@ -190,7 +169,6 @@ class AuditLog(Base):
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     session_id = Column(String(128), ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
-    doctor_id = Column(String(128), ForeignKey("doctors.doctor_id", ondelete="CASCADE"), nullable=False, index=True)
     score = Column(Integer, nullable=False)
     reason = Column(Text, nullable=True)
     created_at = Column(
@@ -200,7 +178,27 @@ class AuditLog(Base):
     )
 
     session = relationship("Session")
-    doctor = relationship("Doctor")
 
     def __repr__(self) -> str:
         return f"<AuditLog(id={self.id}, session_id={self.session_id!r}, score={self.score})>"
+
+class DiagnosticImage(Base):
+    """
+    Stores raw medical images or composited output directly in the DB.
+    """
+    __tablename__ = "diagnostic_images"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    session_id = Column(String(128), ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False, index=True)
+    image_data = Column(LargeBinary, nullable=False)
+    image_type = Column(String(64), nullable=False) # e.g., 'synthesis_composite'
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    session = relationship("Session")
+
+    def __repr__(self) -> str:
+        return f"<DiagnosticImage(id={self.id}, session_id={self.session_id!r}, type={self.image_type!r})>"

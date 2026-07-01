@@ -9,7 +9,6 @@ providing a queryable audit trail.
 Each entry includes:
   - timestamp (ISO 8601)
   - node (which endpoint triggered the log)
-  - patient_id (if applicable)
   - action (what the AI did)
   - result (the AI's output summary)
   - confidence (model confidence, if applicable)
@@ -39,7 +38,6 @@ def log_audit_event(
     node: str,
     action: str,
     result: str,
-    patient_id: Optional[int] = None,
     confidence: Optional[float] = None,
     metadata: Optional[dict[str, Any]] = None,
 ) -> None:
@@ -51,7 +49,6 @@ def log_audit_event(
               (e.g. 'clinical_assess', 'image_predict', 'agent_chat').
         action: What the AI did (e.g. 'xgboost_prediction', 'onnx_classification').
         result: Summary of the AI's output.
-        patient_id: Optional patient identifier.
         confidence: Optional model confidence score (0.0–1.0).
         metadata: Optional dict with extra context (probabilities, tools_used, etc.).
     """
@@ -60,7 +57,6 @@ def log_audit_event(
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "node": node,
-        "patient_id": patient_id,
         "action": action,
         "result": result,
         "confidence": confidence,
