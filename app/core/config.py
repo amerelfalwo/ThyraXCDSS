@@ -4,6 +4,11 @@ Reads from environment variables or .env file.
 """
 from pydantic_settings import BaseSettings
 from pathlib import Path
+import os
+from dotenv import load_dotenv
+
+env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 
 class Settings(BaseSettings):

@@ -8,8 +8,10 @@ Combines:
     - Node 3: Ultrasound Gatekeeper (ONNX MobileNetV2)
     - Node 4: ONNX Segmentation & Classification (ACR TI-RADS)
     - Node 5: Medical AI Assistant Chat (Groq/Llama-3 + RAG + Web Search)
-    - NEW: FNAC Cytopathology (Bethesda System I–VI)
-    - NEW: Patient State Manager (Dynamic Context Orchestration)
+    - Node 6: FNAC Cytopathology (Bethesda System I–VI)
+    - Node 7: Synthesis LLM + Image Compositor Node
+    - Node 8: Medical Dictionary AI Chat (Research Agent)
+    - Patient State Manager (Dynamic Context Orchestration)
 
 Production Features:
     - Groq (Llama-3) powered agent — fast inference, low cost
@@ -141,9 +143,9 @@ app = FastAPI(
         "- **Node 3** `POST /image/validate` — Ultrasound gatekeeper (ONNX)\n"
         "- **Node 4** `POST /image/predict` — ONNX segmentation + classification (ACR TI-RADS)\n"
         "- **Node 5** `POST /agent/chat` — Medical AI assistant (Groq/Llama-3)\n"
-        "- **NEW** `POST /ai/chat` — Simple AI chat (no IDs required)\n"
-        "- **NEW** `POST /synthesis/review` — Synthesis LLM + Image Compositor Node\n"
-        "- **NEW** `POST /fnac/predict` — FNAC cytopathology (Bethesda I–VI)\n\n"
+        "- **Node 6** `POST /fnac/predict` — FNAC cytopathology (Bethesda I–VI)\n"
+        "- **Node 7** `POST /synthesis/review` — Synthesis LLM + Image Compositor Node\n"
+        "- **Node 8** `POST /ai/chat/dictionary` — Medical Dictionary AI Chat\n\n"
         "## Context Orchestration\n"
         "- `GET /state/{session_id}` — Retrieve patient diagnostic context\n"
         "- `DELETE /state/{session_id}` — Clear patient session\n\n"
@@ -200,12 +202,14 @@ async def health_check():
         "version": "4.0.0",
         "llm_backend": "Groq (Llama-3)",
         "nodes": [
-            "clinical_assessment",
-            "agentic_routing",
-            "ultrasound_gatekeeper",
-            "onnx_segmentation",
-            "fnac_cytopathology",
-            "medical_agent_chat",
+            "node_1_clinical_assessment",
+            "node_2_agentic_routing",
+            "node_3_ultrasound_gatekeeper",
+            "node_4_onnx_segmentation",
+            "node_5_medical_agent_chat",
+            "node_6_fnac_cytopathology",
+            "node_7_synthesis_llm",
+            "node_8_medical_dictionary_chat",
         ],
         "circuit_breakers": get_circuit_status(),
     }

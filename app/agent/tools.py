@@ -481,37 +481,17 @@ async def generate_medical_report(patient_id: str, diagnostic_summary: str, reco
 
 
 # ═══════════════════════════════════════════════════════════════
-# Gemini LLM Binding Example (For documentation / reference)
+# Groq LLM Binding Example (For documentation / reference)
 # ═══════════════════════════════════════════════════════════════
 #
-# To bind these MCP tools to a Gemini LLM instance (e.g., via LangChain or native SDK):
+# To bind these MCP tools to a Groq LLM instance (e.g., via LangChain):
 #
-# Option A: Native Gemini SDK using Function Calling
-# --------------------------------------------------
-# import google.generativeai as genai
-# 
-# # Define your tool mapping
-# mcp_tools = [
-#     search_medical_guidelines,
-#     search_medical_web,
-#     search_similar_patients,
-#     search_medical_literature,
-#     generate_medical_report
-# ]
-# 
-# model = genai.GenerativeModel(
-#     model_name='gemini-1.5-pro',
-#     tools=mcp_tools
-# )
-#
-# Option B: Using LangChain / LangGraph with Gemini
-# --------------------------------------------------
-# from langchain_google_genai import ChatGoogleGenerativeAI
+# from langchain_groq import ChatGroq
 # from langchain.tools import tool
 #
 # # You can convert the FastMCP tools into LangChain tools using @tool decorators
-# # and then bind them to the Gemini chat model.
-# llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro")
+# # and then bind them to the Groq chat model.
+# llm = ChatGroq(model="llama-3.1-8b-instant")
 #
 # # Bind the converted tools
 # llm_with_tools = llm.bind_tools(langchain_tools)

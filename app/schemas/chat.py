@@ -1,5 +1,5 @@
 """
-Chat schemas for the ThyraX AI Agent (Node 5).
+Chat schemas for the ThyraX AI Agent (Node 7).
 
 Supports three input modes:
   - Text only:   query provided, no image
@@ -73,21 +73,13 @@ class ChatRequest(BaseModel):
 
 
 class AgentChatRequest(BaseModel):
-    """JSON payload for the Dual-Mode agent chat.
-
-    Mode 1 — General Medical Chat:
-        Send only ``user_message``.  ``session_id``, ``patient_id``, and
-        ``doctor_id`` may all be ``None``.  The agent uses a generic
-        medical-assistant persona and does **not** persist the exchange.
-
-    Mode 2 — Contextual Patient Chat:
-        Provide ``session_id``, ``patient_id``, and ``doctor_id``.
-        The endpoint validates data-isolation, injects patient context,
-        and persists the conversation.
+    """JSON payload for the agent chat.
+    
+    Provides ``session_id`` and ``user_message``.
+    The endpoint loads the diagnostic context from the first 4 nodes
+    via the MemoryManager to provide an informed response.
     """
-    patient_id: Optional[str] = None
-    session_id: Optional[str] = None
-    doctor_id: Optional[str] = None
+    session_id: str
     user_message: str
 
 
