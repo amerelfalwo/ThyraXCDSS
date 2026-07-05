@@ -5,14 +5,14 @@ POST /image/validate  — Local ONNX gatekeeper (Node 3).
 POST /image/predict   — ONNX segmentation + classification pipeline (Node 4).
 
 Architecture Notes:
-  - All ONNX inference is CPU-bound and runs inside run_in_threadpool
-    via the centralized ``app.services.inference`` module.
-  - Models are cached in memory via @functools.lru_cache (first-load only).
-  - No external API calls in the validation pipeline.
-  - Results pushed to Patient State Manager if session_id provided.
+- All ONNX inference is CPU-bound and runs inside run_in_threadpool
+via the centralized ``app.services.inference`` module.
+- Models are cached in memory via @functools.lru_cache (first-load only).
+- No external API calls in the validation pipeline.
+- Results pushed to Patient State Manager if session_id provided.
 
 Threading Pattern:
-  Async route handler (event loop):
+Async route handler (event loop):
     1. await file.read()                   ← async I/O
     2. await run_in_threadpool(…)          ← offload CPU to worker thread
     3. await storage.upload(…)             ← async I/O

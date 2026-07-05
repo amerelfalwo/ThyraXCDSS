@@ -1,186 +1,327 @@
 """
-Synthesis Node - LLM Reviewer Service.
+Synthesis Node — LLM Reviewer Service (Node 7).
 
-This module acts as the final decision layer (Expert Endocrinologist),
-cross-referencing clinical lab values and AI ultrasound classification results
-to produce a cohesive, structured final medical report.
+Accepts outputs from ALL preceding nodes (1-6) and cross-references them
+to produce a unified, authoritative clinical report.
 
-It does NOT process raw images — only numerical/textual data.
+Node inputs (all optional, pulled from session diagnostic_context):
+    - clinical   → Node 1+2  XGBoost assessment
+    - ultrasound → Node 3+4  ONNX gatekeeper + segmentation / TI-RADS
+    - fnac       → Node 6    Bethesda cytopathology
+    - agent_chat → Node 5    last AI-assistant exchange (context only)
+
+No raw image data is sent to the LLM — only numerical / textual features.
 """
 
 import json
 import logging
-from typing import Dict, Any
-from pydantic import BaseModel, Field, field_validator
-from langchain_groq import ChatGroq
+from typing import Any, Dict, Optional
+
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_groq import ChatGroq
+from pydantic import BaseModel, Field, field_validator
+
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
+# ═══════════════════════════════════════════════════════════════
+# Output Schema
+# ═══════════════════════════════════════════════════════════════
+
 class FinalMedicalReport(BaseModel):
-    """Structured output for the LLM Synthesis Node."""
+    """Structured synthesis report produced by the Node 7 LLM reviewer."""
+
+    # ── Core judgements ──────────────────────────────────────
     is_consistent: bool = Field(
         ...,
-        description="Whether the clinical labs and ultrasound classification agree."
+        description="True when all available node outputs agree; False on contradiction.",
     )
     corrected_classification: str = Field(
         ...,
-        description="Final classification: 'Benign', 'Suspicious', 'Malignant', etc."
+        description=(
+            "Final authoritative classification: "
+            "'Benign', 'Suspicious', 'Malignant', 'Indeterminate', etc."
+        ),
     )
     tumor_stage: str = Field(
         ...,
-        description="TNM stage estimate (e.g. T1aN0M0) or 'N/A' if insufficient data."
-    )
-    comprehensive_report: str = Field(
-        ...,
-        description="Professional summary cross-referencing labs and imaging."
+        description="Best-effort TNM stage estimate (e.g. T1aN0M0) or 'N/A'.",
     )
     needs_manual_review: bool = Field(
         ...,
-        description="True if contradictions or high uncertainty require human review."
+        description=(
+            "True when contradictions, low confidence, or high-risk findings "
+            "require a human expert review before clinical action."
+        ),
     )
 
+    # ── Evidence cross-reference ─────────────────────────────
+    nodes_available: list[str] = Field(
+        default_factory=list,
+        description="List of nodes whose data was included in this synthesis.",
+    )
+    comprehensive_report: str = Field(
+        ...,
+        description=(
+            "Professional narrative that explicitly cites lab values, "
+            "TI-RADS level, radiomic features, Bethesda category, and "
+            "AI-chat insights to justify the final classification and stage."
+        ),
+    )
+    recommended_next_steps: str = Field(
+        default="",
+        description=(
+            "Concrete clinical actions: e.g. 'Surgical referral', "
+            "'Repeat ultrasound in 6 months', 'Molecular testing'."
+        ),
+    )
+
+    # ── Bool coercion (robustness against LLM string output) ─
     @field_validator("is_consistent", "needs_manual_review", mode="before")
     @classmethod
     def _coerce_bool(cls, v):
         if isinstance(v, str):
             return v.strip().lower() in ("true", "1", "yes")
-        return v
+        return bool(v)
 
 
-def _extract_clinical_summary(clinical_data: Dict[str, Any]) -> str:
-    """Extract a clean, readable summary of lab values from clinical data."""
-    if not clinical_data:
-        return "No clinical data available."
+# ═══════════════════════════════════════════════════════════════
+# Data extractors — one per node type
+# ═══════════════════════════════════════════════════════════════
 
-    lines = []
-    # Direct lab values
-    lab_keys = ["tsh", "t3", "t4", "free_t3", "free_t4", "tg", "anti_tpo",
-                "anti_tg", "calcitonin", "calcium", "pth"]
+def _extract_clinical_summary(data: Dict[str, Any]) -> str:
+    if not data:
+        return "(no data)"
+
+    lines: list[str] = []
+    lab_keys = [
+        "tsh", "t3", "t4", "free_t3", "free_t4",
+        "tg", "anti_tpo", "anti_tg", "calcitonin", "calcium", "pth",
+    ]
     for key in lab_keys:
-        val = clinical_data.get(key)
+        val = data.get(key)
         if val is not None:
             lines.append(f"  {key.upper()}: {val}")
 
-    # Risk assessment
-    risk = clinical_data.get("risk_level")
-    if risk:
-        lines.append(f"  Clinical Risk Level: {risk}")
-
-    next_step = clinical_data.get("next_step")
-    if next_step:
-        lines.append(f"  Recommended Next Step: {next_step}")
-
-    # Interpretation text
-    interp = clinical_data.get("interpretation") or clinical_data.get("assessment")
-    if interp:
-        lines.append(f"  Clinical Interpretation: {interp}")
-
-    timestamp = clinical_data.get("timestamp")
-    if timestamp:
-        lines.append(f"  Assessment Date: {timestamp}")
+    for label, keys in [
+        ("Risk Level", ["risk_level"]),
+        ("Functional Status", ["functional_status"]),
+        ("Model Confidence", ["model_confidence"]),
+        ("Clinical Recommendation", ["clinical_recommendation"]),
+        ("Next Step", ["next_step"]),
+        ("Interpretation", ["interpretation", "assessment"]),
+    ]:
+        for k in keys:
+            val = data.get(k)
+            if val:
+                lines.append(f"  {label}: {val}")
+                break
 
     if not lines:
-        # Fallback: dump all keys
-        for k, v in clinical_data.items():
+        for k, v in data.items():
             if k != "timestamp" and v is not None:
                 lines.append(f"  {k}: {v}")
 
-    return "\n".join(lines) if lines else "No clinical lab values found."
+    return "\n".join(lines) or "(no lab values found)"
 
 
-def _extract_ultrasound_summary(us_data: Dict[str, Any]) -> str:
-    """Extract classification results and numerical scores from ultrasound data."""
-    if not us_data:
-        return "No ultrasound data available."
+def _extract_ultrasound_summary(data: Dict[str, Any]) -> str:
+    if not data:
+        return "(no data)"
 
-    lines = []
+    lines: list[str] = []
 
-    cls = us_data.get("classification", {})
+    cls = data.get("classification", {})
     if isinstance(cls, dict):
-        label = cls.get("label", "Unknown")
-        confidence = cls.get("confidence_pct", "N/A")
-        risk = cls.get("risk_level", "N/A")
-        tirads = cls.get("acr_tirads_level", "N/A")
-        recommendation = cls.get("clinical_recommendation", "")
+        lines.append(f"  AI Classification : {cls.get('label', 'Unknown')}")
+        lines.append(f"  Confidence        : {cls.get('confidence_pct', 'N/A')}%")
+        lines.append(f"  Risk Level        : {cls.get('risk_level', 'N/A')}")
+        lines.append(f"  ACR TI-RADS       : {cls.get('acr_tirads_level', 'N/A')}")
+        rec = cls.get("clinical_recommendation")
+        if rec:
+            lines.append(f"  System Rec.       : {rec}")
 
-        lines.append(f"  AI Classification: {label}")
-        lines.append(f"  Confidence: {confidence}%")
-        lines.append(f"  Risk Level: {risk}")
-        lines.append(f"  ACR TI-RADS Level: {tirads}")
-        if recommendation:
-            lines.append(f"  System Recommendation: {recommendation}")
-
-        radiomic_features = cls.get("radiomic_features")
-        if radiomic_features:
-            lines.append("  Radiomic Features:")
-            for feature, value in radiomic_features.items():
-                if isinstance(value, float):
-                    lines.append(f"    - {feature}: {value:.2f}")
-                else:
-                    lines.append(f"    - {feature}: {value}")
+        rf = cls.get("radiomic_features")
+        if rf and isinstance(rf, dict):
+            lines.append("  Radiomic Features :")
+            for feat, val in rf.items():
+                fmt_val = f"{val:.3f}" if isinstance(val, float) else val
+                lines.append(f"    - {feat}: {fmt_val}")
     elif cls:
         lines.append(f"  Raw Classification: {cls}")
 
-    # Bounding box info (size indicator)
-    bbox = us_data.get("bbox")
+    bbox = data.get("bbox")
     if bbox and isinstance(bbox, (list, tuple)) and len(bbox) == 4:
-        w = bbox[2] - bbox[0]
-        h = bbox[3] - bbox[1]
-        lines.append(f"  Nodule Bounding Box: {w}x{h} pixels")
+        lines.append(
+            f"  Nodule Size       : {bbox[2] - bbox[0]}×{bbox[3] - bbox[1]} px"
+        )
 
-    # Segmentation summary (area, not image)
-    seg = us_data.get("segmentation", {})
+    seg = data.get("segmentation", {})
     if isinstance(seg, dict):
         area = seg.get("area_pct") or seg.get("area")
         if area is not None:
-            lines.append(f"  Segmentation Area: {area}")
+            lines.append(f"  Segmentation Area : {area}")
 
-    ai_rec = us_data.get("ai_recommendation")
+    ai_rec = data.get("ai_recommendation")
     if ai_rec:
-        lines.append(f"  AI Recommendation: {ai_rec}")
+        lines.append(f"  AI Recommendation : {ai_rec}")
 
-    return "\n".join(lines) if lines else "No ultrasound classification data found."
+    return "\n".join(lines) or "(no ultrasound features found)"
 
 
-def _extract_fnac_summary(fnac_data: Dict[str, Any]) -> str:
-    """Extract cytopathology classification results from FNAC data."""
-    if not fnac_data:
-        return "No FNAC data available."
+def _extract_fnac_summary(data: Dict[str, Any]) -> str:
+    if not data:
+        return "(no data)"
 
-    lines = []
-    
-    cls = fnac_data.get("classification", fnac_data)
+    lines: list[str] = []
+    # data may wrap the payload under a "classification" key
+    cls = data.get("classification", data)
     if isinstance(cls, dict):
-        label = cls.get("bethesda_label", "Unknown")
+        label = cls.get("bethesda_label") or cls.get("label", "Unknown")
         risk = cls.get("malignancy_risk", "N/A")
-        confidence = cls.get("confidence_pct", "N/A")
-        
-        lines.append(f"  Bethesda Classification: {label}")
-        lines.append(f"  Malignancy Risk: {risk}")
-        if confidence != "N/A":
-            lines.append(f"  Confidence: {confidence:.2f}%" if isinstance(confidence, float) else f"  Confidence: {confidence}%")
-        
+        conf = cls.get("confidence_pct", "N/A")
         rec = cls.get("recommendation")
-        if rec:
-            lines.append(f"  Recommendation: {rec}")
-            
-    return "\n".join(lines) if lines else "No FNAC classification data found."
 
+        lines.append(f"  Bethesda Category : {label}")
+        lines.append(f"  Malignancy Risk   : {risk}")
+        if conf != "N/A":
+            conf_str = f"{conf:.2f}" if isinstance(conf, float) else conf
+            lines.append(f"  Confidence        : {conf_str}%")
+        if rec:
+            lines.append(f"  Recommendation    : {rec}")
+
+    return "\n".join(lines) or "(no FNAC data found)"
+
+
+def _extract_agent_chat_summary(data: Dict[str, Any]) -> str:
+    """Extract the most recent AI-assistant insight from Node 5."""
+    if not data:
+        return "(no data)"
+
+    lines: list[str] = []
+
+    # chat router stores last exchange under "last_response" or similar
+    last_response = data.get("last_response") or data.get("response")
+    if last_response:
+        snippet = str(last_response)[:600]
+        lines.append(f"  Last AI Response  : {snippet}")
+
+    query = data.get("last_query") or data.get("query")
+    if query:
+        lines.append(f"  Last Query        : {query}")
+
+    return "\n".join(lines) or "(no agent-chat context found)"
+
+
+# ═══════════════════════════════════════════════════════════════
+# Main synthesis function
+# ═══════════════════════════════════════════════════════════════
 
 async def generate_final_report(
-    clinical_data: Dict[str, Any],
+    clinical_data:   Dict[str, Any],
     ultrasound_data: Dict[str, Any],
-    fnac_data: Dict[str, Any] = None,
+    fnac_data:       Optional[Dict[str, Any]] = None,
+    agent_chat_data: Optional[Dict[str, Any]] = None,
 ) -> FinalMedicalReport:
     """
-    Cross-references clinical lab values, AI ultrasound classification results,
-    and FNAC cytopathology data to generate a final structured medical report.
+    Cross-reference all node outputs and produce the final structured report.
 
-    This function works with NUMBERS and TEXT only — no image processing.
+    Parameters:
+        clinical_data   – Node 1+2 XGBoost assessment dict.
+        ultrasound_data – Node 3+4 ONNX results dict.
+        fnac_data       – Node 6 Bethesda cytopathology dict (optional).
+        agent_chat_data – Node 5 last AI-assistant exchange (optional, context).
+
+    Returns:
+        FinalMedicalReport Pydantic model.
     """
+    # ── Detect which nodes contributed data ──
+    nodes_available: list[str] = []
+    if clinical_data:
+        nodes_available.append("Node 1+2 (Clinical Assessment)")
+    if ultrasound_data:
+        nodes_available.append("Node 3+4 (Ultrasound / TI-RADS)")
+    if fnac_data:
+        nodes_available.append("Node 6 (FNAC / Bethesda)")
+    if agent_chat_data:
+        nodes_available.append("Node 5 (AI Assistant Chat)")
+
+    # ── Build human-readable sections ──
+    clinical_summary   = _extract_clinical_summary(clinical_data)
+    ultrasound_summary = _extract_ultrasound_summary(ultrasound_data)
+    fnac_summary       = _extract_fnac_summary(fnac_data or {})
+    chat_summary       = _extract_agent_chat_summary(agent_chat_data or {})
+
+    # ── JSON schema instruction ──
+    json_schema = (
+        "You MUST respond with ONLY a valid JSON object matching this exact schema:\n"
+        "{\n"
+        '  "is_consistent": <boolean>,\n'
+        '  "corrected_classification": "<string>",\n'
+        '  "tumor_stage": "<string, e.g. T1aN0M0 or N/A>",\n'
+        '  "needs_manual_review": <boolean>,\n'
+        '  "comprehensive_report": "<string>",\n'
+        '  "recommended_next_steps": "<string>"\n'
+        "}\n"
+        "IMPORTANT: is_consistent and needs_manual_review MUST be JSON booleans "
+        "(true/false), NOT strings. Do not wrap the JSON in markdown fences.\n"
+    )
+
+    # ── System prompt ──
+    system_prompt = (
+        "You are an Expert Endocrinologist and Thyroid Oncologist acting as the "
+        "final synthesis layer of an AI-powered Clinical Decision Support System.\n\n"
+        "YOUR TASK:\n"
+        "Cross-reference ALL available diagnostic data from up to 6 AI nodes and "
+        "produce the definitive clinical synthesis for this patient.\n\n"
+        "ANALYSIS RULES:\n"
+        "1. Compare thyroid function labs (TSH, T3, T4, Free T3/T4) against "
+        "ultrasound AI classification (TI-RADS level, risk, confidence, radiomic "
+        "features) and FNAC Bethesda category.\n"
+        "2. Flag `is_consistent = false` and explain contradictions if:\n"
+        "   - Normal labs + high TI-RADS (≥4) or Bethesda IV-VI.\n"
+        "   - Benign ultrasound + Bethesda V-VI cytology.\n"
+        "   - Clinical model says high-risk but imaging says benign.\n"
+        "3. Escalate risk classification when:\n"
+        "   - Hypothyroidism/hyperthyroidism + suspicious imaging/FNAC.\n"
+        "   - Elevated calcitonin (medullary carcinoma risk).\n"
+        "4. Estimate TNM stage from:\n"
+        "   - Nodule size (bounding box pixels or description).\n"
+        "   - Classification aggressiveness across all nodes.\n"
+        "   - Elevated calcitonin → medullary carcinoma consideration.\n"
+        "5. Set `needs_manual_review = true` if:\n"
+        "   - TI-RADS ≥ 4 AND confidence < 70%.\n"
+        "   - Labs, imaging, and FNAC significantly contradict each other.\n"
+        "   - Calcitonin is elevated.\n"
+        "   - Final classification is 'Malignant' regardless of confidence.\n"
+        "6. In `comprehensive_report`, explicitly cite:\n"
+        "   - Specific lab values and their clinical meaning.\n"
+        "   - TI-RADS level and the radiomic features that support it.\n"
+        "   - Bethesda category and its malignancy risk percentage.\n"
+        "   - Any AI-chat insights that added clinical context.\n"
+        "   - WHY a specific classification and stage were chosen.\n"
+        "7. In `recommended_next_steps`, provide concrete clinical guidance "
+        "(e.g., 'Surgical referral for total thyroidectomy', "
+        "'FNA biopsy under ultrasound guidance', "
+        "'Follow-up ultrasound in 6 months').\n\n"
+        "Be precise and data-driven. Do NOT reference raw pixel data or masks.\n\n"
+        + json_schema
+    )
+
+    # ── User message ──
+    node_block = "  " + "\n  ".join(nodes_available) if nodes_available else "  (none)"
+    user_text = (
+        "Nodes that contributed data to this synthesis:\n"
+        f"{node_block}\n\n"
+        "Cross-reference the data below and generate the final synthesis report.\n\n"
+        f"=== NODE 1+2 — CLINICAL ASSESSMENT ===\n{clinical_summary}\n\n"
+        f"=== NODE 3+4 — ULTRASOUND / TI-RADS ===\n{ultrasound_summary}\n\n"
+        f"=== NODE 6   — FNAC / BETHESDA CYTOPATHOLOGY ===\n{fnac_summary}\n\n"
+        f"=== NODE 5   — AI ASSISTANT CHAT (context) ===\n{chat_summary}"
+    )
+
     try:
         llm = ChatGroq(
             temperature=0.1,
@@ -190,56 +331,6 @@ async def generate_final_report(
             model_kwargs={"response_format": {"type": "json_object"}},
         )
 
-        json_schema = (
-            "You MUST respond with ONLY a JSON object matching this exact schema:\n"
-            "{\n"
-            '  "is_consistent": <boolean true or false>,\n'
-            '  "corrected_classification": "<string>",\n'
-            '  "tumor_stage": "<string e.g. T1aN0M0 or N/A>",\n'
-            '  "comprehensive_report": "<string>",\n'
-            '  "needs_manual_review": <boolean true or false>\n'
-            "}\n"
-            "IMPORTANT: is_consistent and needs_manual_review MUST be JSON booleans "
-            "(true/false), NOT strings.\n"
-        )
-
-        system_prompt = (
-            "You are an Expert Endocrinologist and Thyroid Oncologist.\n\n"
-            "YOUR TASK: Cross-reference the patient's clinical lab results, "
-            "AI ultrasound classification output, and FNAC cytopathology results (if available) to produce a precise clinical synthesis.\n\n"
-            "ANALYSIS RULES:\n"
-            "1. Compare thyroid function labs (TSH, T3, T4, Free T3/T4) against the "
-            "ultrasound classification (TI-RADS level, risk level, confidence score, and extracted Radiomic Features) and FNAC Bethesda classification.\n"
-            "2. If labs are normal but imaging shows high TI-RADS (≥4) or FNAC shows Bethesda IV-VI, flag inconsistency "
-            "and recommend appropriate next steps.\n"
-            "3. If labs show hypothyroidism/hyperthyroidism AND imaging/FNAC is suspicious, "
-            "escalate risk classification.\n"
-            "4. Estimate TNM tumor stage based on:\n"
-            "   - Nodule size (from bounding box or description)\n"
-            "   - Classification aggressiveness from Ultrasound and FNAC\n"
-            "   - Lab markers (elevated calcitonin = medullary carcinoma concern)\n"
-            "5. Set needs_manual_review=true if:\n"
-            "   - TI-RADS ≥ 4 with confidence < 70%\n"
-            "   - Labs, imaging, and FNAC contradict each other significantly\n"
-            "   - Calcitonin is elevated\n"
-            "   - Classification is 'Malignant' regardless of confidence\n"
-            "6. Provide an INTERPRETIVE REPORT: In your `comprehensive_report`, explicitly mention how the extracted radiomic features (e.g., taller-than-wide shape, margin irregularity/solidity, echogenicity) support the final TI-RADS level and risk assessment. Explain *why* a specific classification or stage was chosen based on these features and the clinical context.\n\n"
-            "Be precise and data-driven. Reference specific numerical values and stages in your report. Do not reference raw image data or masks.\n\n"
-            + json_schema
-        )
-
-        # Build structured, clean data summary
-        clinical_summary = _extract_clinical_summary(clinical_data)
-        ultrasound_summary = _extract_ultrasound_summary(ultrasound_data)
-        fnac_summary = _extract_fnac_summary(fnac_data or {})
-
-        user_text = (
-            "Cross-reference the following data and generate the final synthesis report.\n\n"
-            f"=== CLINICAL LAB RESULTS ===\n{clinical_summary}\n\n"
-            f"=== ULTRASOUND AI CLASSIFICATION ===\n{ultrasound_summary}\n\n"
-            f"=== FNAC CYTOPATHOLOGY ===\n{fnac_summary}"
-        )
-
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_text),
@@ -247,21 +338,31 @@ async def generate_final_report(
 
         ai_message = await llm.ainvoke(messages)
         raw = json.loads(ai_message.content)
-        result = FinalMedicalReport(**raw)
+
+        result = FinalMedicalReport(
+            **raw,
+            nodes_available=nodes_available,
+        )
 
         logger.info(
-            f"Synthesis complete: consistent={result.is_consistent}, "
-            f"classification={result.corrected_classification}, "
-            f"stage={result.tumor_stage}, review={result.needs_manual_review}"
+            "Synthesis complete | nodes=%s | consistent=%s | "
+            "classification=%s | stage=%s | review=%s",
+            len(nodes_available),
+            result.is_consistent,
+            result.corrected_classification,
+            result.tumor_stage,
+            result.needs_manual_review,
         )
         return result
 
-    except Exception as e:
-        logger.error(f"Error generating final report in synthesis LLM: {e}")
+    except Exception as exc:
+        logger.error("Synthesis LLM error: %s", exc, exc_info=True)
         return FinalMedicalReport(
             is_consistent=False,
             corrected_classification="Unknown",
-            tumor_stage="Unknown",
-            comprehensive_report=f"System error during synthesis: {str(e)}",
+            tumor_stage="N/A",
             needs_manual_review=True,
+            nodes_available=nodes_available,
+            comprehensive_report=f"System error during synthesis: {exc}",
+            recommended_next_steps="Manual clinical review required.",
         )

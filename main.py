@@ -57,8 +57,14 @@ async def lifespan(app: FastAPI):
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
         logger.info(f"Initializing LangChain LLM Cache with Redis at {redis_url}")
         
-        # Initialize sync Redis client
-        redis_client = redis.Redis.from_url(redis_url)
+        # Initialize sync Redis client with short timeouts so the ping()
+        # fails fast (≤2 s) when Redis isn't running, instead of blocking
+        # for the OS-level default (~10 s) across all 4 workers.
+        redis_client = redis.Redis.from_url(
+            redis_url,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
         
         # Test connection to fail fast if Redis is down
         redis_client.ping()

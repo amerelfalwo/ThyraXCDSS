@@ -48,7 +48,7 @@ router = APIRouter(
 # ═══════════════════════════════════════════════════════════════
 
 _SYSTEM_PROMPT = """You are ThyraX, an Elite Clinical Decision Support AI specialized in Thyroid pathology.
-Your primary role is to act as an expert consultant to the medical doctor. You will review and discuss the results from the other diagnostic nodes (e.g., Clinical Assessment, Ultrasound Prediction, FNAC) provided in the PATIENT CONTEXT.
+Your primary role is to act as an expert consultant to the medical doctor. You ONLY discuss results that are explicitly present in the [PATIENT CONTEXT] section below.
 
 RULES:
 - Discuss the clinical and prediction results with the doctor to help formulate a final diagnosis or treatment plan.
@@ -58,6 +58,25 @@ RULES:
 - Be concise but thorough. Provide actionable clinical insights.
 - If asked about non-medical topics, politely decline.
 - Start your answer directly — no preamble like "Based on..." or "Here is what I found".
+
+*** STRICT ANTI-HALLUCINATION RULE — NON-NEGOTIABLE ***
+You MUST ONLY reference diagnostic values that are EXPLICITLY present word-for-word
+in the [PATIENT CONTEXT] section below. This includes (but is not limited to):
+  - TI-RADS level / ACR category
+  - Bethesda category / malignancy risk %
+  - Lab values: TSH, T3, T4, Free T3/T4, Calcitonin, Anti-TPO, etc.
+  - Nodule size, shape, echogenicity
+  - Model confidence scores / radiomic features
+  - Any FNA / FNAC recommendation
+
+If the [PATIENT CONTEXT] does NOT contain a specific finding, you MUST:
+  1. Clearly state the data has not been generated yet for this session.
+  2. Tell the doctor which node must run first (e.g. upload the ultrasound image,
+     run the clinical assessment, or perform FNAC cytopathology).
+  3. NEVER invent, estimate, guess, or assume any diagnostic number or classification.
+
+Fabricating clinical data is a patient safety violation. It is strictly forbidden.
+***
 
 [PATIENT CONTEXT]
 {patient_context}
@@ -175,6 +194,7 @@ async def agent_chat(
     patient_context = "No patient context available for this session."
     effective_history: list = []
 
+    has_diagnostic_data = False
     try:
         memory_ctx = await memory_manager.load_context(
             session_id=request.session_id,
@@ -182,8 +202,33 @@ async def agent_chat(
         patient_context = memory_ctx.to_prompt_context()
         if memory_ctx.chat_history:
             effective_history = memory_ctx.chat_history
+        # Track whether ANY node has deposited real results
+        has_diagnostic_data = bool(
+            memory_ctx.diagnostic_context
+            and any(v for v in memory_ctx.diagnostic_context.values())
+        )
     except Exception as e:
         logger.error(f"Memory load failed: {e}")
+
+    # ── Inject explicit warning into context when no node data exists ──
+    # This prevents the LLM from hallucinating results by making the
+    # absence of data crystal-clear before the system prompt is sent.
+    if not has_diagnostic_data:
+        patient_context = (
+            "[WARNING: NO DIAGNOSTIC DATA AVAILABLE FOR THIS SESSION]\n"
+            "No diagnostic nodes have produced results yet for this session_id.\n"
+            "Available nodes that must run first:\n"
+            "  - Node 1+2 : Clinical Assessment (lab values, XGBoost risk)\n"
+            "  - Node 3+4 : Ultrasound Image Analysis (TI-RADS, segmentation)\n"
+            "  - Node 6   : FNAC Cytopathology (Bethesda category)\n"
+            "You MUST NOT reference any specific diagnostic values. "
+            "Instruct the doctor to run the appropriate node first."
+        )
+        logger.info(
+            "agent_chat: session %s has no diagnostic data — "
+            "anti-hallucination context injected",
+            request.session_id,
+        )
 
     async def _stream_and_save() -> AsyncGenerator[str, None]:
         full_response = ""
@@ -229,6 +274,22 @@ async def agent_chat(
                 )
             except Exception as e:
                 logger.error(f"Failed to save exchange to memory: {e}")
+
+            # ── Persist last exchange as agent_chat diagnostic context ──
+            # This snapshot allows Node 7 (Synthesis) to cross-reference
+            # the AI-assistant conversation without re-reading raw history.
+            try:
+                await memory_manager.save_diagnostic(
+                    session_id=request.session_id,
+                    node_type="agent_chat",
+                    data={
+                        "last_query": request.user_message,
+                        "last_response": full_response,
+                        "mode": "contextual",
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"Failed to save agent_chat diagnostic snapshot: {e}")
 
             # ── Trigger summarization if history grows large ──
             try:
