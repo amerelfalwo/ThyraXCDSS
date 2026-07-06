@@ -21,14 +21,16 @@ ThyraX integrates multiple AI models and workflows into a unified, agentic pipel
   Uses XGBoost for initial clinical data predictions and intelligently routes the patient's diagnostic state.
 - **Node 3: Ultrasound Gatekeeper**
   Employs ONNX MobileNetV2 to validate and preprocess ultrasound images before further analysis.
-- **Node 4: ONNX Segmentation & Classification**
-  Provides precise segmentation and ACR TI-RADS classification for ultrasound imaging.
-- **Node 5: Medical AI Assistant Chat**
-  A robust agentic chatbot powered by Groq (Llama-3), RAG (ChromaDB + Sentence Transformers), and web search fallback to assist doctors with clinical queries.
-- **Synthesis Node:**
-  Synthesizes clinical data, radiomic features (shape, margin, echogenicity), and ultrasound predictions into a comprehensive final diagnostic report with an Image Compositor.
-- **FNAC Cytopathology Node:**
+- **Node 4: ONNX Segmentation, Classification & Radiomics**
+  Provides precise segmentation, extracts radiomic features (Shape, Margin, Echogenicity), and applies ATA (American Thyroid Association) guidelines for risk stratification.
+- **Node 5: Patient-Specific Clinical Chatbot**
+  A fast LLM assistant powered by AsyncGroq (2-3s latency) with strict anti-hallucination guardrails. Dedicated exclusively to querying and analyzing the patient's diagnostic context.
+- **Node 6: Diagnostic Synthesis & Compositing**
+  Synthesizes clinical data, radiomic features, and ultrasound predictions into a comprehensive final diagnostic report with an Image Compositor.
+- **Node 7: FNAC Cytopathology Node**
   Analyzes Fine Needle Aspiration Cytology (FNAC) data based on the Bethesda System for Reporting Thyroid Cytopathology (Categories I–VI).
+- **Node 8: General Knowledge, RAG & Web Search**
+  An AI assistant for general medical queries, retrieval-augmented generation (RAG), and web search, isolated from patient-specific data to prevent context mixing.
 
 ## 🧠 Continuous Context Orchestration
 
@@ -48,8 +50,7 @@ ThyraX integrates multiple AI models and workflows into a unified, agentic pipel
 
 - **Backend:** FastAPI, Python 3.12+, Uvicorn, Gunicorn
 - **AI / ML:** XGBoost, ONNX Runtime, scikit-learn, OpenCV, Pillow
-- **LLM & Agents:** LangChain, LangChain-Groq, MCP (Model Context Protocol), ddgs (Web Search)
-- **RAG System:** ChromaDB, Sentence-Transformers
+- **LLM & Inference:** Native AsyncGroq, Direct LLM Invocation, Model Context Protocol (MCP)
 - **Database:** PostgreSQL, Supabase, SQLAlchemy 2.0, asyncpg, Alembic
 - **Caching & Tasks:** Redis, Celery, RabbitMQ (Pika), Cachetools
 
@@ -57,9 +58,9 @@ ThyraX integrates multiple AI models and workflows into a unified, agentic pipel
 
 - `POST /clinical/assess` — XGBoost prediction & routing
 - `POST /image/validate` — Ultrasound gatekeeper (ONNX)
-- `POST /image/predict` — Segmentation + ACR TI-RADS
+- `POST /image/predict` — Segmentation + ATA Risk Stratification
 - `POST /fnac/predict` — FNAC cytopathology analysis
-- `POST /agent/chat` — Agentic medical assistant
+- `POST /agent/chat` — Fast Dual-Mode Medical Assistant (Direct LLM)
 - `POST /synthesis/review` — Final report synthesis & image composition
 - `GET /state/{session_id}` — Retrieve patient diagnostic context
 - `DELETE /state/{session_id}` — Clear patient session

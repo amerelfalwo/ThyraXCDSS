@@ -102,7 +102,7 @@ def extract_radiomic_features(mask: np.ndarray, img_gray: np.ndarray, bbox: list
 
 def assess_risk_level(class_idx: int, confidence: float, features: dict = None) -> dict:
     """
-    Map radiomic features and classification output to a points-based TI-RADS score.
+    Map radiomic features and classification output to ATA (American Thyroid Association) guidelines.
 
     Args:
         class_idx: Predicted class (0 = benign, 1 = suspicious).
@@ -110,67 +110,43 @@ def assess_risk_level(class_idx: int, confidence: float, features: dict = None) 
         features: Extracted radiomic features dict.
 
     Returns:
-        Dict with risk_level, acr_tirads_level, and clinical_recommendation.
+        Dict with risk_level, ata_level, and clinical_recommendation.
     """
     if features is None:
         features = {}
 
-    points = 0
-    
-    # 1. Shape
-    if features.get("taller_than_wide", False):
-        points += 3
-        
-    # 2. Margin
-    if features.get("irregular_margin", False):
-        points += 2
-        
-    # 3. Echogenicity
-    if features.get("markedly_hypoechoic", False):
-        points += 3
-    elif features.get("hypoechoic", False):
-        points += 2
+    has_high_suspicion_feature = features.get("taller_than_wide", False) or \
+                                 features.get("irregular_margin", False) or \
+                                 (class_idx == 1 and confidence >= 0.85)
+
+    is_hypoechoic = features.get("hypoechoic", False) or features.get("markedly_hypoechoic", False)
+
+    if has_high_suspicion_feature:
+        ata_level = "High Suspicion"
+        risk_level = "High Suspicion (>70-90% risk)"
+        rec = "ATA High Suspicion pattern. FNA biopsy is strongly recommended for nodules >= 1.0 cm."
+        next_step = "Referral for FNA biopsy if nodule is >= 1.0 cm."
+    elif is_hypoechoic:
+        ata_level = "Intermediate Suspicion"
+        risk_level = "Intermediate Suspicion (10-20% risk)"
+        rec = "ATA Intermediate Suspicion pattern. FNA biopsy is recommended for nodules >= 1.0 cm."
+        next_step = "Perform FNA biopsy if nodule is >= 1.0 cm."
+    elif class_idx == 1 and confidence >= 0.65:
+        ata_level = "Low Suspicion"
+        risk_level = "Low Suspicion (5-10% risk)"
+        rec = "ATA Low Suspicion pattern. FNA biopsy recommended if nodule is >= 1.5 cm."
+        next_step = "Perform FNA if nodule is >= 1.5 cm; otherwise, routine follow-up."
     else:
-        points += 1 # Isoechoic
-        
-    # 4. Neural Network Suspicion (acts as composition / calcifications proxy)
-    if class_idx == 1:
-        if confidence >= 0.85:
-            points += 4  # Very suspicious -> Solid + Calcifications
-        elif confidence >= 0.65:
-            points += 2  # Moderately suspicious
-        else:
-            points += 1
-            
-    # Map points to TI-RADS
-    # TR1: 0 points, TR2: 2 points, TR3: 3 points, TR4: 4-6 points, TR5: >=7 points
-    if points <= 2:
-        acr_tirads = "TR2"
-        risk_level = "Benign / Very Low Suspicion"
-        rec = "Imaging findings are consistent with a benign-appearing nodule. Follow-up ultrasound in 12–24 months."
-        next_step = "Routine follow-up ultrasound in 12-24 months."
-    elif points == 3:
-        acr_tirads = "TR3"
-        risk_level = "Mildly Suspicious"
-        rec = "Imaging findings suggest a mildly suspicious nodule. Consider FNA if nodule is >= 2.5 cm."
-        next_step = "Consider FNA if nodule >= 2.5 cm; otherwise 12 month follow-up."
-    elif 4 <= points <= 6:
-        acr_tirads = "TR4"
-        risk_level = "Moderately Suspicious"
-        rec = "Imaging findings are moderately suspicious. FNA biopsy is recommended for nodules >= 1.5 cm."
-        next_step = "Perform FNA if nodule >= 1.5 cm; otherwise, follow-up ultrasound in 6-12 months."
-    else:
-        acr_tirads = "TR5"
-        risk_level = "Highly Suspicious"
-        rec = "Imaging findings are highly suspicious for malignancy. FNA biopsy strongly recommended for nodules >= 1.0 cm."
-        next_step = "Immediate referral for FNA biopsy (if nodule >= 1.0 cm) and endocrinology evaluation."
+        ata_level = "Very Low Suspicion"
+        risk_level = "Very Low Suspicion (<3% risk)"
+        rec = "ATA Very Low Suspicion pattern. FNA recommended only if nodule is >= 2.0 cm."
+        next_step = "Perform FNA if nodule is >= 2.0 cm; otherwise, routine follow-up."
 
     return {
         "risk_level": risk_level,
-        "acr_tirads_level": acr_tirads,
+        "ata_level": ata_level,
         "clinical_recommendation": rec,
         "next_step": next_step,
-        "points": points,
     }
 
 
@@ -301,8 +277,8 @@ def process_full_pipeline(
             "confidence": None,
             "message": (
                 "The segmentation model could not identify any thyroid nodules "
-                "or relevant regions of interest. This corresponds to ACR TI-RADS "
-                "TR1 (Benign — no nodule). If clinical suspicion remains, consider "
+                "or relevant regions of interest. This corresponds to the ATA "
+                "Benign pattern. If clinical suspicion remains, consider "
                 "re-imaging or referral."
             ),
             "bbox": None,
@@ -324,8 +300,26 @@ def process_full_pipeline(
     mask_bgr = cv2.cvtColor(mask_full * 255, cv2.COLOR_GRAY2BGR)
     _, mask_enc = cv2.imencode(".png", mask_bgr)
     
-    overlay_bgr = cv2.cvtColor(blended, cv2.COLOR_RGB2BGR)
-    _, overlay_enc = cv2.imencode(".png", overlay_bgr)
+    # Create annotated image with bounding box and classification label
+    annotated_bgr = img_color.copy()
+    x_min, y_min, x_max, y_max = bbox
+    label_text = "Suspicious" if class_idx == 1 else "Benign"
+    color = (0, 0, 255) if class_idx == 1 else (0, 255, 0)
+    
+    cv2.rectangle(annotated_bgr, (x_min, y_min), (x_max, y_max), color, 2)
+    text_y = y_min - 10 if y_min - 10 > 10 else y_min + 20
+    cv2.putText(
+        annotated_bgr, 
+        f"{label_text} ({confidence*100:.1f}%)", 
+        (x_min, text_y),
+        cv2.FONT_HERSHEY_SIMPLEX, 
+        0.6, 
+        color, 
+        2, 
+        cv2.LINE_AA
+    )
+    
+    _, overlay_enc = cv2.imencode(".png", annotated_bgr)
     
     roi_bgr = cv2.cvtColor(roi, cv2.COLOR_RGB2BGR)
     _, roi_enc = cv2.imencode(".png", roi_bgr)
@@ -340,7 +334,7 @@ def process_full_pipeline(
 
     # ── Memory Management for heavy arrays ──
     del img_color, img_gray, nparr
-    del mask_full, roi, blended, mask_bgr, overlay_bgr, roi_bgr
+    del mask_full, roi, blended, mask_bgr, annotated_bgr, roi_bgr
     gc.collect()
 
     return {
@@ -353,7 +347,7 @@ def process_full_pipeline(
             "confidence_pct": round(confidence * 100, 2),
             "raw_logit": round(raw_logit, 4) if raw_logit is not None else None,
             "risk_level": risk["risk_level"],
-            "acr_tirads_level": risk["acr_tirads_level"],
+            "ata_level": risk["ata_level"],
             "clinical_recommendation": risk["clinical_recommendation"],
             "next_step": risk["next_step"],
             "needs_manual_review": needs_review,

@@ -120,7 +120,7 @@ async def ai_chat_dictionary(request: SimpleChatRequest, background_tasks: Backg
     generator = stream_research_agent(
         query=request.user_message,
         session_id=request.session_id,
-        fast_path=True,
+        fast_path=False,  # Set to False to enable full AgentExecutor (RAG + Web Search tools)
         background_tasks=background_tasks,
     )
 
