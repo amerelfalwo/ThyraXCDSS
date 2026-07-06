@@ -185,11 +185,7 @@ def perform_segmentation(img_color: np.ndarray, threshold: float = 0.6):
     bbox = [x_min, y_min, x_max, y_max]
     roi = orig_rgb[y_min : y_max + 1, x_min : x_max + 1]
     
-    overlay = orig_rgb.copy()
-    overlay[mask_full > 0] = [0, 255, 0]
-    blended = cv2.addWeighted(orig_rgb, 0.7, overlay, 0.3, 0)
-    
-    return mask_full, bbox, roi, blended
+    return mask_full, bbox, roi, orig_rgb
 
 
 def perform_classification(roi: np.ndarray):
@@ -284,12 +280,26 @@ def process_full_pipeline(
             "bbox": None,
         }
 
-    mask_full, bbox, roi, blended = seg_result
+    mask_full, bbox, roi, orig_rgb = seg_result
 
     # ────────────────────────────────────────────────────────────
     # Phase 3: Classification
     # ────────────────────────────────────────────────────────────
     class_idx, confidence, raw_logit = perform_classification(roi)
+
+    # Set colors based on classification
+    color_rgb = [255, 0, 0] if class_idx == 1 else [0, 255, 0] # Red for Suspicious, Green for Benign
+    color_bgr = (0, 0, 255) if class_idx == 1 else (0, 255, 0)
+    label_text = "mlignant" if class_idx == 1 else "Benign"
+
+    # Create a highly professional mask overlay
+    overlay = orig_rgb.copy()
+    overlay[mask_full > 0] = color_rgb
+    blended = cv2.addWeighted(orig_rgb, 0.75, overlay, 0.25, 0)
+    
+    # Draw a clean contour around the mask
+    contours, _ = cv2.findContours(mask_full, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(blended, contours, -1, color_rgb, 2, cv2.LINE_AA)
 
     unique_id = str(uuid.uuid4())
 
@@ -307,19 +317,50 @@ def process_full_pipeline(
     # 3. Create annotated image with bounding box and classification label (No mask fill)
     annotated_bgr = img_color.copy()
     x_min, y_min, x_max, y_max = bbox
-    label_text = "Suspicious" if class_idx == 1 else "Benign"
-    color = (0, 0, 255) if class_idx == 1 else (0, 255, 0)
     
-    cv2.rectangle(annotated_bgr, (x_min, y_min), (x_max, y_max), color, 2)
-    text_y = y_min - 10 if y_min - 10 > 10 else y_min + 20
+    # Add uniform padding around the bounding box
+    pad = 10
+    x1, y1 = max(0, x_min - pad), max(0, y_min - pad)
+    x2, y2 = min(annotated_bgr.shape[1], x_max + pad), min(annotated_bgr.shape[0], y_max + pad)
+    
+    text_color = (255, 255, 255) # White text for contrast
+    
+    # Draw professional bounding box
+    cv2.rectangle(annotated_bgr, (x1, y1), (x2, y2), color_bgr, 2, cv2.LINE_AA)
+    
+    # Setup text properties
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.6
+    thickness = 1
+    (text_w, text_h), baseline = cv2.getTextSize(label_text, font, font_scale, thickness)
+    
+    # Position the text above the box, or inside if too close to top
+    text_x = x1
+    text_y = y1 - 8
+    
+    # Draw a filled background rectangle for the text to make it readable
+    bg_y1 = text_y - text_h - 4
+    bg_y2 = text_y + 4
+    bg_x2 = text_x + text_w + 10
+    
+    # Adjust if going off the top screen
+    if bg_y1 < 0:
+        bg_y1 = y1
+        bg_y2 = y1 + text_h + 8
+        text_y = bg_y2 - 6
+        text_x = x1 + 5
+        bg_x2 = x1 + text_w + 10
+        
+    # Draw the background for text and the text itself
+    cv2.rectangle(annotated_bgr, (text_x, bg_y1), (bg_x2, bg_y2), color_bgr, cv2.FILLED)
     cv2.putText(
         annotated_bgr, 
-        f"{label_text} ({confidence*100:.1f}%)", 
-        (x_min, text_y),
-        cv2.FONT_HERSHEY_SIMPLEX, 
-        0.6, 
-        color, 
-        2, 
+        label_text, 
+        (text_x + 5, text_y),
+        font, 
+        font_scale, 
+        text_color, 
+        thickness, 
         cv2.LINE_AA
     )
     
