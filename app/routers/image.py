@@ -33,7 +33,6 @@ from app.core.database import get_db
 from app.schemas.image import ImagePredictionResponse, ImageValidationResponse
 from app.schemas.ai_nodes import MULTI_IMAGE_REQUEST_BODY
 from app.services.inference import run_ultrasound_inference, run_gatekeeper_inference
-from app.services.vision_explanation import generate_vision_explanation
 
 logger = logging.getLogger(__name__)
 
@@ -261,9 +260,9 @@ async def predict_ultrasound_image(
                         return None
 
                 result["images"] = {
-                    "mask_url": await _save_db(images_data.get("mask_bytes"), "mask"),
-                    "overlay_url": await _save_db(images_data.get("overlay_bytes"), "overlay"),
-                    "roi_url": await _save_db(images_data.get("roi_bytes"), "roi"),
+                    "original_url": await _save_db(images_data.get("original_bytes"), "original"),
+                    "mask_overlay_url": await _save_db(images_data.get("mask_overlay_bytes"), "mask_overlay"),
+                    "annotated_url": await _save_db(images_data.get("annotated_bytes"), "annotated"),
                 }
 
             # ── Forced bypass red flag ──
@@ -275,31 +274,8 @@ async def predict_ultrasound_image(
                     "but results may be unreliable if it is not."
                 )
 
-            # ── Step 4: Async I/O — LLM explanation ──
-            cls = result.get("classification", {})
-            analysis_type = "Ultrasound Segmentation + Classification (ACR TI-RADS)"
-            if isinstance(cls, dict):
-                key_findings = (
-                    f"Label: {cls.get('label')}; "
-                    f"Risk Level: {cls.get('risk_level')}; "
-                    f"ACR TI-RADS: {cls.get('acr_tirads_level')}"
-                )
-                model_confidence = f"{cls.get('confidence_pct', 0):.2f}%"
-                system_recommendation = cls.get("clinical_recommendation", "")
-            else:
-                key_findings = str(cls) if cls else "No classification result."
-                model_confidence = "N/A"
-                system_recommendation = result.get("message", "") or str(cls)
-
-            if system_recommendation:
-                ai_recommendation = await generate_vision_explanation(
-                    analysis_type=analysis_type,
-                    key_findings=key_findings,
-                    model_confidence=model_confidence,
-                    system_recommendation=system_recommendation,
-                )
-                if ai_recommendation:
-                    result["ai_recommendation"] = ai_recommendation
+            # ── Step 4: LLM Explanation Removed for Speed ──
+            # (If AI explanation is needed, it will be generated in Node 6 or via Node 5)
 
             # ── Step 5: Async I/O — Push to Database ──
             if session_id:

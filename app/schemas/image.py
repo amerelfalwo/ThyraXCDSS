@@ -101,9 +101,9 @@ class ClassificationResult(BaseModel):
 
 
 class ImageUrlsResponse(BaseModel):
-    mask_url: Optional[str] = Field(None, description="URL to the binary segmentation mask image")
-    overlay_url: Optional[str] = Field(None, description="URL to the mask overlaid on the original ultrasound")
-    roi_url: Optional[str] = Field(None, description="URL to the cropped Region of Interest (nodule)")
+    original_url: Optional[str] = Field(None, description="URL to the original ultrasound image")
+    mask_overlay_url: Optional[str] = Field(None, description="URL to the mask overlaid on the original ultrasound")
+    annotated_url: Optional[str] = Field(None, description="URL to the annotated image with bounding box and label")
 
 
 class SegmentationInfo(BaseModel):

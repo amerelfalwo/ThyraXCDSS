@@ -296,11 +296,15 @@ def process_full_pipeline(
     # ────────────────────────────────────────────────────────────
     # Phase 4: Prepare result images (in-memory bytes)
     # ────────────────────────────────────────────────────────────
-    # Convert mask_full to BGR so it encodes cleanly as color
-    mask_bgr = cv2.cvtColor(mask_full * 255, cv2.COLOR_GRAY2BGR)
-    _, mask_enc = cv2.imencode(".png", mask_bgr)
+    # 1. Original Input Image
+    _, original_enc = cv2.imencode(".png", img_color)
     
-    # Create annotated image with bounding box and classification label
+    # 2. Image with mask overlaid
+    # Note: blended is RGB, we must convert it to BGR for cv2.imencode
+    blended_bgr = cv2.cvtColor(blended, cv2.COLOR_RGB2BGR)
+    _, blended_enc = cv2.imencode(".png", blended_bgr)
+    
+    # 3. Create annotated image with bounding box and classification label (No mask fill)
     annotated_bgr = img_color.copy()
     x_min, y_min, x_max, y_max = bbox
     label_text = "Suspicious" if class_idx == 1 else "Benign"
@@ -319,10 +323,7 @@ def process_full_pipeline(
         cv2.LINE_AA
     )
     
-    _, overlay_enc = cv2.imencode(".png", annotated_bgr)
-    
-    roi_bgr = cv2.cvtColor(roi, cv2.COLOR_RGB2BGR)
-    _, roi_enc = cv2.imencode(".png", roi_bgr)
+    _, annotated_enc = cv2.imencode(".png", annotated_bgr)
 
     # ────────────────────────────────────────────────────────────
     # Phase 5: Clinical risk assessment & Radiomics
@@ -334,7 +335,7 @@ def process_full_pipeline(
 
     # ── Memory Management for heavy arrays ──
     del img_color, img_gray, nparr
-    del mask_full, roi, blended, mask_bgr, annotated_bgr, roi_bgr
+    del mask_full, roi, blended, blended_bgr, annotated_bgr
     gc.collect()
 
     return {
@@ -358,9 +359,9 @@ def process_full_pipeline(
             "roi_extraction": "bounding_box_crop",
         },
         "images": {
-            "mask_bytes": mask_enc.tobytes(),
-            "overlay_bytes": overlay_enc.tobytes(),
-            "roi_bytes": roi_enc.tobytes(),
+            "original_bytes": original_enc.tobytes(),
+            "mask_overlay_bytes": blended_enc.tobytes(),
+            "annotated_bytes": annotated_enc.tobytes(),
             "unique_id": unique_id,
         },
     }

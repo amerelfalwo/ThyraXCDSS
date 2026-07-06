@@ -32,8 +32,6 @@ from app.core.security import verify_internal_api_key
 from app.schemas.fnac import FnacPredictionResponse
 from app.schemas.ai_nodes import MULTI_IMAGE_REQUEST_BODY
 from app.services.inference import run_fnac_inference
-from app.services.vision_explanation import generate_vision_explanation
-
 logger = logging.getLogger(__name__)
 
 
@@ -145,21 +143,9 @@ async def predict_fnac(
                 )
                 continue
 
-            # ── Step 3: Async I/O — LLM explanation ──
-            key_findings = (
-                f"{result['bethesda_label']}; "
-                f"Malignancy Risk: {result['malignancy_risk']}"
-            )
-            model_confidence = f"{result['confidence_pct']:.2f}%"
-            system_recommendation = result.get("recommendation", "")
+            # ── Step 3: LLM explanation removed for speed ──
+            # (If AI explanation is needed, it will be generated in Node 6 or via Node 5)
             ai_recommendation = None
-            if system_recommendation:
-                ai_recommendation = await generate_vision_explanation(
-                    analysis_type="FNAC Cytopathology (Bethesda System)",
-                    key_findings=key_findings,
-                    model_confidence=model_confidence,
-                    system_recommendation=system_recommendation,
-                )
 
             # ── Step 4: Async I/O — Push to Dual-State Memory Manager ──
             if session_id:

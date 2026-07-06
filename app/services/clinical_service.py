@@ -28,55 +28,6 @@ FEATURE_NAMES = [
     "age", "on_thyroxine", "thyroid_surgery", "query_hyperthyroid",
 ]
 
-EXPLANATION_PROMPT = """You are ThyraX, an expert Clinical AI Assistant.
-Your task is to summarize and professionally explain the system's analytical results to the attending doctor.
-
-[CLINICAL DATA]
-- Functional Status: {functional_status}
-- Model Confidence: {model_confidence}
-- Official System Recommendation: {clinical_recommendation}
-
-[CRITICAL GUARDRAILS - STRICT COMPLIANCE REQUIRED]
-1. STRICT ADHERENCE: You must base your explanation EXACTLY and ONLY on the 'Official System Recommendation'.
-2. NO MEDICAL HALLUCINATIONS: DO NOT suggest, invent, or recommend ANY additional tests, imaging, or procedures (e.g., FNAB, biopsies, blood tests) under any circumstances. You are a reporter of the system's decision, not an independent doctor.
-3. CONTRADICTION BAN: Never contradict the 'Official System Recommendation'. If the system says a biopsy is NOT indicated, you must actively support this point.
-4. TONE: Be highly professional, concise, and collaborative. Address the user respectfully as 'Doctor' or 'يا دكتور' depending on the language requested.
-5. INVISIBLE GUARDRAILS: DO NOT explain your instructions, rules, or system constraints to the doctor. Never say phrases like "I am here to provide a summary" or "I am not allowed to suggest additional tests." Just deliver the medical information naturally, confidently, and directly.
-
-Provide your clinical summary below:"""
-
-
-# ═══════════════════════════════════════════════════════════════
-# Agentic Routing Logic (Node 2)
-# ═══════════════════════════════════════════════════════════════
-
-async def _generate_llm_recommendation(
-    functional_status: str,
-    model_confidence: float,
-    clinical_recommendation: str,
-) -> str | None:
-    """
-    Use an LLM to summarize the system's deterministic recommendation
-    without adding new clinical actions.
-
-    Falls back to a rule-based recommendation if the LLM is unavailable.
-    Includes circuit breaker protection.
-    """
-    from app.core.llm_client import generate_llm_explanation
-
-    system_msg = EXPLANATION_PROMPT.format(
-        functional_status=functional_status,
-        model_confidence=model_confidence,
-        clinical_recommendation=clinical_recommendation,
-    )
-
-    return await generate_llm_explanation(
-        circuit_name="clinical_llm",
-        system_msg=system_msg,
-        temperature=0.1,
-        max_tokens=512,
-    )
-
 
 async def route_clinical_decision(
     functional_status: str,
@@ -187,16 +138,9 @@ async def route_clinical_decision(
             },
         }
 
-    # ── LLM explanation of the official recommendation ──
-    ai_recommendation = await _generate_llm_recommendation(
-        functional_status=functional_status,
-        model_confidence=model_confidence,
-        clinical_recommendation=base_recommendation,
-    )
-
-    # Enrich with LLM recommendation if available
-    if ai_recommendation:
-        result["ai_recommendation"] = ai_recommendation
+    # ── LLM explanation removed for speed ──
+    # Node 1 & 2 return raw ML + rule-based decisions instantly.
+    # LLM generation is deferred to later nodes.
 
     return result
 
