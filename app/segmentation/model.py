@@ -126,25 +126,30 @@ def assess_risk_level(class_idx: int, confidence: float, features: dict = None) 
         risk_level = "High Suspicion (>70-90% risk)"
         rec = "ATA High Suspicion pattern. FNA biopsy is strongly recommended for nodules >= 1.0 cm."
         next_step = "Referral for FNA biopsy if nodule is >= 1.0 cm."
+        acr_tirads_level = "TR5"
     elif is_hypoechoic:
         ata_level = "Intermediate Suspicion"
         risk_level = "Intermediate Suspicion (10-20% risk)"
         rec = "ATA Intermediate Suspicion pattern. FNA biopsy is recommended for nodules >= 1.0 cm."
         next_step = "Perform FNA biopsy if nodule is >= 1.0 cm."
+        acr_tirads_level = "TR4"
     elif class_idx == 1 and confidence >= 0.65:
         ata_level = "Low Suspicion"
         risk_level = "Low Suspicion (5-10% risk)"
         rec = "ATA Low Suspicion pattern. FNA biopsy recommended if nodule is >= 1.5 cm."
         next_step = "Perform FNA if nodule is >= 1.5 cm; otherwise, routine follow-up."
+        acr_tirads_level = "TR3"
     else:
         ata_level = "Very Low Suspicion"
         risk_level = "Very Low Suspicion (<3% risk)"
         rec = "ATA Very Low Suspicion pattern. FNA recommended only if nodule is >= 2.0 cm."
         next_step = "Perform FNA if nodule is >= 2.0 cm; otherwise, routine follow-up."
+        acr_tirads_level = "TR2"
 
     return {
         "risk_level": risk_level,
         "ata_level": ata_level,
+        "acr_tirads_level": acr_tirads_level,
         "clinical_recommendation": rec,
         "next_step": next_step,
     }
@@ -390,6 +395,7 @@ def process_full_pipeline(
             "raw_logit": round(raw_logit, 4) if raw_logit is not None else None,
             "risk_level": risk["risk_level"],
             "ata_level": risk["ata_level"],
+            "acr_tirads_level": risk["acr_tirads_level"],
             "clinical_recommendation": risk["clinical_recommendation"],
             "next_step": risk["next_step"],
             "needs_manual_review": needs_review,

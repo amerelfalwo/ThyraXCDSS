@@ -80,6 +80,10 @@ class ClassificationResult(BaseModel):
             "features extracted from the segmentation mask, NOT a formal clinical assessment."
         ),
     )
+    acr_tirads_level: str = Field(
+        ...,
+        description="ACR TI-RADS risk category mapped from the ATA classification (e.g., TR2, TR3, TR4, TR5).",
+    )
     clinical_recommendation: str = Field(
         ...,
         description="Evidence-based follow-up recommendation per ATA guidelines.",
