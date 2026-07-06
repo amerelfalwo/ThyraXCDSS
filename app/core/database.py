@@ -11,6 +11,9 @@ connect_args = {
 
 # Dynamically append ?prepared_statement_cache_size=0 to the URL
 db_url = settings.ASYNC_DATABASE_URL
+if not db_url:
+    raise ValueError("DATABASE_URL environment variable is missing or empty.")
+
 if "?" in db_url:
     db_url += "&prepared_statement_cache_size=0"
 else:
