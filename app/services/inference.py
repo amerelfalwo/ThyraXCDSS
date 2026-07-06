@@ -55,7 +55,7 @@ def run_ultrasound_inference(image_bytes: bytes) -> dict:
         2. Run ONNX U-Net segmentation to generate a binary mask.
         3. Extract the ROI via bounding-box crop.
         4. Run ONNX classification on the ROI.
-        5. Map the result to ACR TI-RADS risk levels.
+        5. Map the result to ATA risk levels.
         6. Encode mask/overlay/roi images as raw bytes.
 
     Args:

@@ -300,7 +300,7 @@ async def predict_ultrasound_image(
                     confidence=cls.get("confidence_pct", 0) / 100.0 if cls else None,
                     metadata={
                         "risk_level": cls.get("risk_level"),
-                        "acr_tirads_level": cls.get("acr_tirads_level"),
+                        "ata_level": cls.get("ata_level"),
                         "clinical_recommendation": cls.get("clinical_recommendation"),
                         "needs_manual_review": cls.get("needs_manual_review", False),
                         "session_id": session_id,

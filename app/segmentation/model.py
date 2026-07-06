@@ -11,9 +11,9 @@ Handles the full segmentation → classification workflow:
 
 Clinical Standards:
   - Classification labels: "benign" / "suspicious" (NOT "malignant")
-  - Risk stratification mapped to ACR TI-RADS analogues (TR2–TR5)
-  - TR1 is reserved for "no nodule detected" (handled separately)
-  - Recommendations follow ACR TI-RADS evidence-based guidelines
+  - Risk stratification mapped to ATA Guidelines analogues
+  - "No nodule detected" is handled separately
+  - Recommendations follow ATA Guidelines evidence-based guidelines
 
 Note on Segmentation:
   The segmentation mask is used for ROI extraction (bounding-box crop)
@@ -40,7 +40,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 def extract_radiomic_features(mask: np.ndarray, img_gray: np.ndarray, bbox: list) -> dict:
     """
-    Extracts radiomic features from the segmentation mask to estimate TI-RADS points.
+    Extracts radiomic features from the segmentation mask to estimate ATA risk features.
     1. Shape: Taller-than-wide.
     2. Margin: Irregularity (solidity / circularity).
     3. Echogenicity: Hypoechoic vs Isoechoic.

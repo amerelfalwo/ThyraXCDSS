@@ -2,10 +2,10 @@
 Schemas for Image Pipeline (Nodes 3 & 4).
 
 Clinical Standards Compliance:
-  - ACR TI-RADS (Thyroid Imaging Reporting and Data System) for
+  - ATA Guidelines for
     ultrasound-based risk stratification.
   - Labels use imaging-appropriate terminology ("suspicious" not
-    "malignant") per ACR TI-RADS lexicon.
+    "malignant") per ATA Guidelines lexicon.
   - Mandatory medical disclaimer on every prediction response.
 """
 
@@ -42,10 +42,10 @@ class ClassificationResult(BaseModel):
     """
     Clinically validated classification output.
 
-    Terminology follows ACR TI-RADS lexicon:
+    Terminology follows ATA Guidelines lexicon:
       - Labels: "benign" / "suspicious" (not "malignant" — that requires histopathology)
-      - Risk levels: Based on AI confidence mapped to TI-RADS-analogous categories
-      - Recommendations: Evidence-based follow-up guidance per ACR guidelines
+      - Risk levels: Based on AI confidence mapped to ATA Guidelines-analogous categories
+      - Recommendations: Evidence-based follow-up guidance per ATA guidelines
     """
     prediction: int = Field(
         ..., description="Raw model output: 0 = benign, 1 = suspicious"
@@ -72,19 +72,17 @@ class ClassificationResult(BaseModel):
             "'Intermediate Suspicion' | 'High Suspicion' | 'Very High Suspicion'"
         ),
     )
-    acr_tirads_level: str = Field(
+    ata_level: str = Field(
         ...,
         description=(
-            "AI-estimated ACR TI-RADS analogue (TR2–TR5). "
-            "NOTE: True ACR TI-RADS scoring requires evaluation of 5 "
-            "ultrasonographic feature categories (composition, echogenicity, "
-            "shape, margin, echogenic foci) by a radiologist. This is a "
-            "model-derived approximation, NOT a formal TI-RADS assessment."
+            "AI-estimated ATA (American Thyroid Association) risk level. "
+            "NOTE: This is a model-derived approximation based on ultrasonographic "
+            "features extracted from the segmentation mask, NOT a formal clinical assessment."
         ),
     )
     clinical_recommendation: str = Field(
         ...,
-        description="Evidence-based follow-up recommendation per ACR TI-RADS guidelines.",
+        description="Evidence-based follow-up recommendation per ATA guidelines.",
     )
     next_step: str = Field(
         ...,

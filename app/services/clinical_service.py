@@ -100,7 +100,7 @@ async def route_clinical_decision(
             f"examination. Cold nodules in {functional_status} patients carry a "
             f"HIGHER malignancy risk (5-15%). The recommended next step is a "
             f"HIGH-RESOLUTION THYROID ULTRASOUND to evaluate the nodule "
-            f"characteristics per ACR TI-RADS criteria."
+            f"characteristics per ATA guidelines."
         )
         result = {
             "risk_level": risk,

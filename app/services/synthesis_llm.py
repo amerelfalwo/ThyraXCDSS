@@ -66,7 +66,7 @@ class FinalMedicalReport(BaseModel):
         ...,
         description=(
             "Professional narrative that explicitly cites lab values, "
-            "TI-RADS level, radiomic features, Bethesda category, and "
+            "ATA Risk Level, radiomic features, Bethesda category, and "
             "AI-chat insights to justify the final classification and stage."
         ),
     )
@@ -138,7 +138,7 @@ def _extract_ultrasound_summary(data: Dict[str, Any]) -> str:
         lines.append(f"  AI Classification : {cls.get('label', 'Unknown')}")
         lines.append(f"  Confidence        : {cls.get('confidence_pct', 'N/A')}%")
         lines.append(f"  Risk Level        : {cls.get('risk_level', 'N/A')}")
-        lines.append(f"  ACR TI-RADS       : {cls.get('acr_tirads_level', 'N/A')}")
+        lines.append(f"  ATA Risk Level    : {cls.get('ata_level', 'N/A')}")
         rec = cls.get("clinical_recommendation")
         if rec:
             lines.append(f"  System Rec.       : {rec}")
@@ -278,10 +278,10 @@ async def generate_final_report(
         "produce the definitive clinical synthesis for this patient.\n\n"
         "ANALYSIS RULES:\n"
         "1. Compare thyroid function labs (TSH, T3, T4, Free T3/T4) against "
-        "ultrasound AI classification (TI-RADS level, risk, confidence, radiomic "
+        "ultrasound AI classification (ATA Risk Level, risk, confidence, radiomic "
         "features) and FNAC Bethesda category.\n"
         "2. Flag `is_consistent = false` and explain contradictions if:\n"
-        "   - Normal labs + high TI-RADS (≥4) or Bethesda IV-VI.\n"
+        "   - Normal labs + High Suspicion ATA Risk or Bethesda IV-VI.\n"
         "   - Benign ultrasound + Bethesda V-VI cytology.\n"
         "   - Clinical model says high-risk but imaging says benign.\n"
         "3. Escalate risk classification when:\n"
@@ -292,13 +292,13 @@ async def generate_final_report(
         "   - Classification aggressiveness across all nodes.\n"
         "   - Elevated calcitonin → medullary carcinoma consideration.\n"
         "5. Set `needs_manual_review = true` if:\n"
-        "   - TI-RADS ≥ 4 AND confidence < 70%.\n"
+        "   - ATA Risk Level is High Suspicion AND confidence < 70%.\n"
         "   - Labs, imaging, and FNAC significantly contradict each other.\n"
         "   - Calcitonin is elevated.\n"
         "   - Final classification is 'Malignant' regardless of confidence.\n"
         "6. In `comprehensive_report`, explicitly cite:\n"
         "   - Specific lab values and their clinical meaning.\n"
-        "   - TI-RADS level and the radiomic features that support it.\n"
+        "   - ATA Risk Level and the radiomic features that support it.\n"
         "   - Bethesda category and its malignancy risk percentage.\n"
         "   - Any AI-chat insights that added clinical context.\n"
         "   - WHY a specific classification and stage were chosen.\n"

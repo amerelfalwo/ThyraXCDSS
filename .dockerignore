@@ -24,10 +24,15 @@ logs/
 .idea/
 .DS_Store
 
-# Testing
+# Testing & Scratch
+test/
 tests/
-test_e2e.py
+test_*.py
 .pytest_cache/
+scratch/
+sammry/
+ACCELERATION_PLAN.md
+API_DOCUMENTATION.md
 
 # Docker
 Dockerfile

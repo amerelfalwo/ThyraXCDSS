@@ -6,7 +6,7 @@ v4.0.0 — Continuous Context Orchestrator
 Combines:
     - Node 1+2: Clinical Assessment (XGBoost) + Agentic Routing
     - Node 3: Ultrasound Gatekeeper (ONNX MobileNetV2)
-    - Node 4: ONNX Segmentation & Classification (ACR TI-RADS)
+    - Node 4: ONNX Segmentation & Classification (ATA Guidelines)
     - Node 5: Medical AI Assistant Chat (Groq/Llama-3 + RAG + Web Search)
     - Node 6: FNAC Cytopathology (Bethesda System I–VI)
     - Node 7: Synthesis LLM + Image Compositor Node
@@ -147,7 +147,7 @@ app = FastAPI(
         "## Core AI Nodes\n"
         "- **Node 1+2** `POST /clinical/assess` — XGBoost prediction + agentic routing\n"
         "- **Node 3** `POST /image/validate` — Ultrasound gatekeeper (ONNX)\n"
-        "- **Node 4** `POST /image/predict` — ONNX segmentation + classification (ACR TI-RADS)\n"
+        "- **Node 4** `POST /image/predict` — ONNX segmentation + classification (ATA Guidelines)\n"
         "- **Node 5** `POST /agent/chat` — Medical AI assistant (Groq/Llama-3)\n"
         "- **Node 6** `POST /fnac/predict` — FNAC cytopathology (Bethesda I–VI)\n"
         "- **Node 7** `POST /synthesis/review` — Synthesis LLM + Image Compositor Node\n"
