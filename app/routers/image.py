@@ -178,7 +178,6 @@ async def validate_ultrasound_image(
 
 @router.post(
     "/predict",
-    response_model=List[ImagePredictionResponse],
     openapi_extra=MULTI_IMAGE_REQUEST_BODY,
 )
 async def predict_ultrasound_image(
@@ -191,16 +190,21 @@ async def predict_ultrasound_image(
     """
     Run the full ONNX segmentation → classification pipeline.
 
+    Multi-Image Consensus Logic:
+      When multiple images are uploaded, each image is processed
+      independently through the full pipeline. After all individual
+      results are collected, a unified CONSENSUS classification is
+      computed using a clinically-safe aggregation strategy:
+        - Highest suspicion wins (worst-case approach per ATA guidelines).
+        - Confidence is averaged across all suspicious findings.
+        - The consensus is appended to each individual result AND
+          saved to the Patient State Manager as the authoritative decision.
+
     Threading Architecture:
       1. ``await file.read()`` — non-blocking file I/O on event loop.
       2. ``await run_in_threadpool(run_ultrasound_inference, …)`` —
-         offloads ALL CPU-bound ONNX work (U-Net segmentation, ROI
-         extraction, classification) to a worker thread.
-      3. Async I/O (storage upload, DB commit, LLM call) stays on
-         the event loop after the threadpool returns.
-
-    If ``session_id`` is provided, the result is pushed to the
-    Patient State Manager for downstream correlation.
+         offloads ALL CPU-bound ONNX work to a worker thread.
+      3. Async I/O (storage upload, DB commit) stays on the event loop.
 
     Args:
         request: FastAPI Request (used to build media URLs).
@@ -212,7 +216,10 @@ async def predict_ultrasound_image(
         raise HTTPException(status_code=400, detail="No files uploaded. Please attach at least one image.")
 
     base_url = str(request.base_url)
-    results: List[ImagePredictionResponse] = []
+    results: List[dict] = []
+
+    # ── Track classification votes for consensus ──
+    classification_votes: List[dict] = []
 
     for file in files:
         if not file.content_type or not file.content_type.startswith("image/"):
@@ -221,7 +228,7 @@ async def predict_ultrasound_image(
                     filename=file.filename,
                     status="error",
                     message="Invalid file type. Please upload an image.",
-                )
+                ).model_dump()
             )
             continue
 
@@ -230,16 +237,12 @@ async def predict_ultrasound_image(
             image_bytes = await file.read()
 
             # ── Step 2: Offload CPU-bound inference to threadpool ──
-            # This calls the pure synchronous function from
-            # app.services.inference which runs U-Net segmentation +
-            # classification entirely on a worker thread.
             result = await run_in_threadpool(
                 run_ultrasound_inference, image_bytes
             )
             result["filename"] = file.filename
 
             # ── Step 3: Async I/O — Upload images to database ──
-            # (runs on the event loop, non-blocking)
             images_data = result.pop("images", None)
             if images_data and "unique_id" in images_data:
                 uid = images_data["unique_id"]
@@ -274,24 +277,24 @@ async def predict_ultrasound_image(
                     "but results may be unreliable if it is not."
                 )
 
-            # ── Step 4: LLM Explanation Removed for Speed ──
-            # (If AI explanation is needed, it will be generated in Node 6 or via Node 5)
-
-            # ── Step 5: Async I/O — Push to Database ──
-            if session_id:
-                await memory_manager.save_diagnostic(
-                    session_id=session_id,
-                    node_type="ultrasound",
-                    data=dict(result)  # copy to prevent circular ref
-                )
-
-                # Automated synthesis trigger has been removed to keep Node 4 independent.
-
+            # ── Collect classification vote for consensus ──
+            cls = result.get("classification", {})
+            if isinstance(cls, dict) and "prediction" in cls:
+                classification_votes.append({
+                    "filename": file.filename,
+                    "prediction": cls["prediction"],
+                    "label": cls.get("label", "unknown"),
+                    "confidence_pct": cls.get("confidence_pct", 0),
+                    "risk_level": cls.get("risk_level", ""),
+                    "ata_level": cls.get("ata_level", ""),
+                    "acr_tirads_level": cls.get("acr_tirads_level", ""),
+                    "clinical_recommendation": cls.get("clinical_recommendation", ""),
+                    "next_step": cls.get("next_step", ""),
+                })
 
             # ── Audit log ──
             from app.core.audit import log_audit_event
 
-            cls = result.get("classification", {})
             if isinstance(cls, dict):
                 log_audit_event(
                     node="image_predict",
@@ -324,7 +327,130 @@ async def predict_ultrasound_image(
                     filename=file.filename,
                     status="error",
                     message=f"Image processing error: {e}",
-                )
+                ).model_dump()
             )
 
+    # ══════════════════════════════════════════════════════════════
+    # Multi-Image Consensus Classification
+    # ══════════════════════════════════════════════════════════════
+    consensus = None
+    if len(classification_votes) > 1:
+        consensus = _compute_consensus(classification_votes)
+
+        # Attach consensus to every individual result
+        for r in results:
+            if isinstance(r, dict) and r.get("status") == "success":
+                r["consensus_classification"] = consensus
+
+    elif len(classification_votes) == 1:
+        # Single image — the individual result IS the consensus
+        consensus = {
+            "total_images_analyzed": 1,
+            "consensus_source": "single_image",
+            **{k: v for k, v in classification_votes[0].items() if k != "filename"},
+        }
+
+    # ── Save consensus to Patient State Manager ──
+    if session_id and consensus:
+        save_data = {"individual_results": results}
+        save_data["consensus_classification"] = consensus
+        await memory_manager.save_diagnostic(
+            session_id=session_id,
+            node_type="ultrasound",
+            data=save_data,
+        )
+
     return results
+
+
+# ═══════════════════════════════════════════════════════════════
+# Consensus Aggregation Logic
+# ═══════════════════════════════════════════════════════════════
+
+# ATA risk hierarchy for worst-case aggregation (higher index = higher risk)
+_ATA_RISK_ORDER = [
+    "Very Low Suspicion",
+    "Low Suspicion",
+    "Intermediate Suspicion",
+    "High Suspicion",
+]
+
+_TIRADS_ORDER = ["TR1", "TR2", "TR3", "TR4", "TR5"]
+
+
+def _compute_consensus(votes: List[dict]) -> dict:
+    """
+    Compute a unified consensus classification from multiple image votes.
+
+    Clinical Aggregation Strategy (Worst-Case / Highest Suspicion Wins):
+      - If ANY image is classified as suspicious → consensus is suspicious.
+      - The ATA/TI-RADS level is the HIGHEST across all images.
+      - Confidence is averaged across all images with the consensus label.
+      - This follows the clinical principle of erring on the side of caution.
+
+    Args:
+        votes: List of classification dicts from individual images.
+
+    Returns:
+        Dict with consensus classification, source images count, and agreement stats.
+    """
+    total = len(votes)
+    suspicious_count = sum(1 for v in votes if v["prediction"] == 1)
+    benign_count = total - suspicious_count
+
+    # ── Consensus label: worst-case wins ──
+    if suspicious_count > 0:
+        consensus_prediction = 1
+        consensus_label = "suspicious"
+        # Average confidence only from suspicious images
+        suspicious_confs = [v["confidence_pct"] for v in votes if v["prediction"] == 1]
+        avg_confidence = sum(suspicious_confs) / len(suspicious_confs)
+    else:
+        consensus_prediction = 0
+        consensus_label = "benign"
+        all_confs = [v["confidence_pct"] for v in votes]
+        avg_confidence = sum(all_confs) / len(all_confs)
+
+    # ── Highest ATA level ──
+    best_ata_idx = -1
+    best_ata = votes[0].get("ata_level", "Very Low Suspicion")
+    best_tirads = votes[0].get("acr_tirads_level", "TR2")
+    best_rec = votes[0].get("clinical_recommendation", "")
+    best_next = votes[0].get("next_step", "")
+    best_risk = votes[0].get("risk_level", "")
+
+    for v in votes:
+        ata = v.get("ata_level", "Very Low Suspicion")
+        tirads = v.get("acr_tirads_level", "TR2")
+
+        ata_idx = _ATA_RISK_ORDER.index(ata) if ata in _ATA_RISK_ORDER else -1
+        if ata_idx > best_ata_idx:
+            best_ata_idx = ata_idx
+            best_ata = ata
+            best_tirads = tirads
+            best_rec = v.get("clinical_recommendation", "")
+            best_next = v.get("next_step", "")
+            best_risk = v.get("risk_level", "")
+
+    agreement_pct = round(max(suspicious_count, benign_count) / total * 100, 1)
+
+    return {
+        "total_images_analyzed": total,
+        "consensus_source": "multi_image_aggregation",
+        "consensus_method": "highest_suspicion_wins",
+        "prediction": consensus_prediction,
+        "label": consensus_label,
+        "confidence_pct": round(avg_confidence, 2),
+        "risk_level": best_risk,
+        "ata_level": best_ata,
+        "acr_tirads_level": best_tirads,
+        "clinical_recommendation": best_rec,
+        "next_step": best_next,
+        "agreement": {
+            "suspicious_images": suspicious_count,
+            "benign_images": benign_count,
+            "agreement_pct": agreement_pct,
+        },
+        "needs_manual_review": agreement_pct < 100 or avg_confidence < 65,
+    }
+

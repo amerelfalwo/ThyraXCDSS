@@ -57,6 +57,7 @@ async def assess_clinical(req: ClinicalAssessmentRequest):
                     "model_confidence": result.model_confidence,
                     "clinical_recommendation": result.clinical_recommendation,
                     "next_step": result.next_step,
+                    "next_step_details": result.next_step_details,
                 }
             )
 

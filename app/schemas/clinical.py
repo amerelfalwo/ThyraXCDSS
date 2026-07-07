@@ -36,6 +36,5 @@ class ClinicalAssessmentResponse(BaseModel):
     # ── Agentic routing (Node 2) ──
     risk_level: str
     clinical_recommendation: str
-    ai_recommendation: Optional[str] = None
     next_step: str
     next_step_details: Dict[str, Any]

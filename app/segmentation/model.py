@@ -115,11 +115,16 @@ def assess_risk_level(class_idx: int, confidence: float, features: dict = None) 
     if features is None:
         features = {}
 
-    has_high_suspicion_feature = features.get("taller_than_wide", False) or \
-                                 features.get("irregular_margin", False) or \
-                                 (class_idx == 1 and confidence >= 0.85)
+    has_high_suspicion_feature = (class_idx == 1) and (
+        features.get("taller_than_wide", False) or 
+        features.get("irregular_margin", False) or 
+        confidence >= 0.85
+    )
 
-    is_hypoechoic = features.get("hypoechoic", False) or features.get("markedly_hypoechoic", False)
+    is_hypoechoic = (class_idx == 1) and (
+        features.get("hypoechoic", False) or 
+        features.get("markedly_hypoechoic", False)
+    )
 
     if has_high_suspicion_feature:
         ata_level = "High Suspicion"
@@ -133,7 +138,7 @@ def assess_risk_level(class_idx: int, confidence: float, features: dict = None) 
         rec = "ATA Intermediate Suspicion pattern. FNA biopsy is recommended for nodules >= 1.0 cm."
         next_step = "Perform FNA biopsy if nodule is >= 1.0 cm."
         acr_tirads_level = "TR4"
-    elif class_idx == 1 and confidence >= 0.65:
+    elif class_idx == 1:
         ata_level = "Low Suspicion"
         risk_level = "Low Suspicion (5-10% risk)"
         rec = "ATA Low Suspicion pattern. FNA biopsy recommended if nodule is >= 1.5 cm."
@@ -295,7 +300,7 @@ def process_full_pipeline(
     # Set colors based on classification
     color_rgb = [255, 0, 0] if class_idx == 1 else [0, 255, 0] # Red for Suspicious, Green for Benign
     color_bgr = (0, 0, 255) if class_idx == 1 else (0, 255, 0)
-    label_text = "mlignant" if class_idx == 1 else "Benign"
+    label_text = "Suspicious" if class_idx == 1 else "Benign"
 
     # Create a highly professional mask overlay
     overlay = orig_rgb.copy()
