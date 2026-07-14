@@ -105,7 +105,7 @@ BETHESDA_MAP = {
     0: {
         "category": "I",
         "label": "Bethesda I — Non-diagnostic / Unsatisfactory",
-        "malignancy_risk": "1–4%",
+        "malignancy_risk": "3%",
         "recommendation": (
             "Specimen is non-diagnostic. Repeat FNA with ultrasound guidance "
             "is recommended. If repeatedly non-diagnostic, consider surgical "
@@ -115,7 +115,7 @@ BETHESDA_MAP = {
     1: {
         "category": "II",
         "label": "Bethesda II — Benign",
-        "malignancy_risk": "0–3%",
+        "malignancy_risk": "2%",
         "recommendation": (
             "Findings are consistent with a benign lesion. No immediate "
             "intervention required. Clinical and sonographic follow-up "
@@ -125,7 +125,7 @@ BETHESDA_MAP = {
     2: {
         "category": "III",
         "label": "Bethesda III — Atypia of Undetermined Significance (AUS/FLUS)",
-        "malignancy_risk": "6–18%",
+        "malignancy_risk": "13%",
         "recommendation": (
             "Atypical cells identified. Consider molecular testing (e.g., "
             "Afirma, ThyroSeq) to refine risk. Repeat FNA in 3–6 months "
@@ -135,7 +135,7 @@ BETHESDA_MAP = {
     3: {
         "category": "IV",
         "label": "Bethesda IV — Follicular Neoplasm / Suspicious for FN (FN/SFN)",
-        "malignancy_risk": "10–40%",
+        "malignancy_risk": "25%",
         "recommendation": (
             "Follicular-patterned lesion identified. Molecular testing is "
             "recommended if available. Diagnostic surgical lobectomy is the "
@@ -145,7 +145,7 @@ BETHESDA_MAP = {
     4: {
         "category": "V",
         "label": "Bethesda V — Suspicious for Malignancy",
-        "malignancy_risk": "45–60%",
+        "malignancy_risk": "53%",
         "recommendation": (
             "Cytological findings are suspicious for malignancy (likely "
             "papillary thyroid carcinoma). Near-total thyroidectomy or "
@@ -156,7 +156,7 @@ BETHESDA_MAP = {
     5: {
         "category": "VI",
         "label": "Bethesda VI — Malignant",
-        "malignancy_risk": "94–96%",
+        "malignancy_risk": "95%",
         "recommendation": (
             "Cytological findings are diagnostic of malignancy. Total "
             "thyroidectomy with central neck dissection is the standard "
